@@ -553,6 +553,7 @@ scope_render :: proc(view: ^Scope_View, rt: ^alicorn.Runtime) -> alicorn.Node_ID
 			state=alicorn.Button_State{selected=selected},
 			style=alicorn.layout_style(.Row, height=SCOPE_TRACK_ROW_HEIGHT, grow=1, padding=5),
 			text_style=alicorn.Text_Style{overflow=.Ellipsis},
+			content_style=alicorn.button_content_style(horizontal=.Start, vertical=.Center, padding_x=8, padding_y=4),
 		)
 		if clicked {
 			track_changed := !view.ui.has_selected_track || view.ui.selected_track_id != track.id
@@ -655,7 +656,9 @@ scope_render :: proc(view: ^Scope_View, rt: ^alicorn.Runtime) -> alicorn.Node_ID
 	if view.ui.has_selected_track && alicorn.button(
 		&ui,
 		"← Overview",
-		style=alicorn.layout_style(.Row, width=104, height=24),
+		style=alicorn.layout_style(.Row, width=112, height=24),
+		text_style=alicorn.Text_Style{overflow=.Ellipsis},
+		content_style=alicorn.button_content_style(horizontal=.Start, vertical=.Center, padding_x=8, padding_y=0),
 	) {
 		view.ui.has_selected_track = false
 		view.ui.selected_track_id = 0
@@ -751,6 +754,7 @@ scope_render :: proc(view: ^Scope_View, rt: ^alicorn.Runtime) -> alicorn.Node_ID
 			state=alicorn.Button_State{selected=selected},
 			style=alicorn.layout_style(.Row, height=SCOPE_EVENT_ROW_HEIGHT, padding=5),
 			text_style=alicorn.Text_Style{overflow=.Ellipsis},
+			content_style=alicorn.button_content_style(horizontal=.Start, vertical=.Center, padding_x=8, padding_y=4),
 		)
 		if clicked {
 			view.ui.has_selected_event = true
