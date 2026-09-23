@@ -1,0 +1,43 @@
+name: Fresh dependency build
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: laytan/setup-odin@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          release: latest
+
+      - name: Install SDL3 development library
+        if: runner.os == 'macOS'
+        run: brew install pkg-config sdl3
+
+      - name: Build through the managed dependency resolver (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: .\tools\build.ps1
+
+      - name: Build through the managed dependency resolver (macOS)
+        if: runner.os == 'macOS'
+        run: sh tools/build.sh

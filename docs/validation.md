@@ -65,3 +65,23 @@ keyboard/track toggling, and the same 30-second idle proof remain to be run on
 the user's Mac. Caliber's blocking wake ABI has since been committed and pushed
 as `4814a5161809f37d07f8456b81988013f038867a`; `dependencies.lock.json` pins
 that revision so a clean checkout can build against the published ABI.
+
+## Managed dependency workflow
+
+Validated on Windows on 2026-09-23 after starting without a Scope-owned
+`.deps/` directory and with the sibling roots unset:
+
+- `tools/bootstrap.ps1` cloned Alicorn `a0387156cea706b36411c2961394c6d03d227fe9`
+  and Caliber `4814a5161809f37d07f8456b81988013f038867a` into `.deps/` and
+  resolved both at the exact lockfile revisions.
+- `tools/build.ps1` built Caliber, the Go shared backend, and the Odin app via
+  the managed roots and `-collection:alicorn=...`.
+- `tools/run.ps1 -Trace testdata/smoke-trace.json -Smoke` rebuilt through that
+  same path, loaded the trace, rendered, and exited with PASS.
+- `tools/bootstrap.sh` and all POSIX scripts passed `sh -n` under Git Bash;
+  the shell bootstrap resolved the same managed pins. This checks shell syntax
+  and resolver behavior on Windows, not a macOS/Linux native build.
+
+The fresh-checkout GitHub Actions workflow now calls these same build scripts
+on Windows and macOS. That hosted workflow has not yet run from this local
+change; the macOS native build and interactive gate remain outstanding.

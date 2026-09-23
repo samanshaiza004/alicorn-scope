@@ -9,9 +9,9 @@ import "core:path/filepath"
 import "core:strings"
 import "core:sync"
 import "core:thread"
-import alicorn "../alicorn/runtime"
+import alicorn "alicorn:runtime"
 import frontend "./frontend"
-import host "../alicorn/native/sdl_gpu"
+import host "alicorn:native/sdl_gpu"
 
 SCOPE_RESOURCE_LIMIT :: 1 << 20
 SCOPE_EVENT_WINDOW_ROWS :: 512

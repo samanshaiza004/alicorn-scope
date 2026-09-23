@@ -1,77 +1,89 @@
+[CmdletBinding()]
 param(
     [string]$Odin = $env:ALICORN_ODIN,
     [string]$Go = $env:SCOPE_GO,
     [string]$AlicornRoot = $env:ALICORN_ROOT,
-    [string]$CaliberRoot = $env:CALIBER_ROOT
+    [string]$CaliberRoot = $env:CALIBER_ROOT,
+    [switch]$DevDeps
 )
 
 $ErrorActionPreference = 'Stop'
 $ScopeRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-if (-not $AlicornRoot) { $AlicornRoot = Join-Path $ScopeRoot '..\alicorn' }
-if (-not $CaliberRoot) { $CaliberRoot = Join-Path $ScopeRoot '..\caliber' }
-$AlicornRoot = (Resolve-Path $AlicornRoot).Path
-$CaliberRoot = (Resolve-Path $CaliberRoot).Path
 
-$lock = Get-Content -Raw (Join-Path $ScopeRoot 'dependencies.lock.json') | ConvertFrom-Json
-foreach ($dependency in @(@{ name='Alicorn'; path=$AlicornRoot; revision=$lock.alicorn.revision }, @{ name='Caliber'; path=$CaliberRoot; revision=$lock.caliber.revision })) {
-    $actual = (& git -C $dependency.path rev-parse HEAD).Trim()
-    if ($LASTEXITCODE -ne 0 -or $actual -ne $dependency.revision) {
-        throw "$($dependency.name) checkout must be at pinned revision $($dependency.revision); found $actual"
+function Resolve-ScopeTool {
+    param([Parameter(Mandatory)][string]$Name, [string]$Requested)
+    $commandName = if ($Requested) { $Requested } else { $Name }
+    if ([IO.Path]::IsPathRooted($commandName)) {
+        if (-not (Test-Path -LiteralPath $commandName -PathType Leaf)) { throw "$Name executable not found: $commandName" }
+        return (Resolve-Path -LiteralPath $commandName).Path
     }
-}
-if (-not (Select-String -Quiet -Path (Join-Path $CaliberRoot 'crates\caliber-ffi\src\lib.rs') -Pattern 'context_wait_wake|context_stop_wake_waiters')) {
-    throw 'Pinned Caliber checkout is missing the blocking wake ABI.'
-}
-
-if (-not $Odin) { $Odin = 'odin' }
-if ([IO.Path]::IsPathRooted($Odin)) {
-    if (-not (Test-Path -LiteralPath $Odin -PathType Leaf)) { throw "Odin executable not found: $Odin" }
-} else {
-    $odinCommand = Get-Command $Odin -ErrorAction SilentlyContinue
-    if (-not $odinCommand) { throw "Odin executable not found: $Odin" }
-    $Odin = $odinCommand.Source
+    $command = Get-Command $commandName -ErrorAction SilentlyContinue
+    if (-not $command) { throw "$Name was not found. Install it and ensure it is on PATH, then rerun tools/run.ps1." }
+    return $command.Source
 }
 
+$Git = Resolve-ScopeTool -Name 'Git'
+$Cargo = Resolve-ScopeTool -Name 'Cargo'
+$Odin = Resolve-ScopeTool -Name 'Odin' -Requested $Odin
 if (-not $Go) {
     $go64 = 'C:\Program Files\Go\bin\go.exe'
-    if (Test-Path -LiteralPath $go64 -PathType Leaf) { $Go = $go64 }
-    else { $Go = 'go' }
+    if (Test-Path -LiteralPath $go64 -PathType Leaf) { $Go = $go64 } else { $Go = 'go' }
 }
-if ([IO.Path]::IsPathRooted($Go)) {
-    if (-not (Test-Path -LiteralPath $Go -PathType Leaf)) { throw "Go executable not found: $Go" }
-} else {
-    $goCommand = Get-Command $Go -ErrorAction SilentlyContinue
-    if (-not $goCommand) { throw "Go executable not found: $Go" }
-    $Go = $goCommand.Source
-}
+$Go = Resolve-ScopeTool -Name 'Go' -Requested $Go
 $goArch = (& $Go env GOARCH).Trim()
-if ($LASTEXITCODE -ne 0 -or $goArch -ne 'amd64') { throw "Scope requires 64-bit Go/cgo on Windows; selected GOARCH=$goArch" }
+if ($LASTEXITCODE -ne 0 -or $goArch -ne 'amd64') {
+    throw "Scope needs 64-bit Go/cgo on Windows; '$Go' reports GOARCH=$goArch. Install 64-bit Go or set SCOPE_GO to its go.exe."
+}
+
+$bootstrap = Join-Path $PSScriptRoot 'bootstrap.ps1'
+$resolved = & $bootstrap -AlicornRoot $AlicornRoot -CaliberRoot $CaliberRoot -DevDeps:$DevDeps
+if (-not $resolved -or -not $resolved.AlicornRoot -or -not $resolved.CaliberRoot) {
+    throw 'Dependency bootstrap did not return both Alicorn and Caliber roots.'
+}
+$AlicornRoot = $resolved.AlicornRoot
+$CaliberRoot = $resolved.CaliberRoot
+
+$caliberSource = Join-Path $CaliberRoot 'crates\caliber-ffi\src\lib.rs'
+if (-not (Test-Path -LiteralPath $caliberSource -PathType Leaf) -or
+    -not (Select-String -Quiet -Path $caliberSource -Pattern 'context_wait_wake|context_stop_wake_waiters')) {
+    throw 'The resolved Caliber checkout is missing the blocking wake ABI required by Scope.'
+}
 
 $out = Join-Path $ScopeRoot 'out'
 New-Item -ItemType Directory -Force -Path $out | Out-Null
 $oldCgo = $env:CGO_ENABLED
 $oldCache = $env:GOCACHE
 $oldTelemetry = $env:GOTELEMETRY
+Push-Location $ScopeRoot
 try {
     $env:CGO_ENABLED = '1'
     $env:GOCACHE = Join-Path $out 'go-cache'
     $env:GOTELEMETRY = 'off'
-    & cargo build --release --manifest-path (Join-Path $CaliberRoot 'Cargo.toml') -p caliber-ffi
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+    Write-Host 'Building Caliber FFI...'
+    & $Cargo build --release --manifest-path (Join-Path $CaliberRoot 'Cargo.toml') -p caliber-ffi
+    if ($LASTEXITCODE -ne 0) { throw "Caliber build failed with exit code $LASTEXITCODE." }
+
+    Write-Host 'Building Scope Go backend...'
     & $Go build -buildmode=c-shared -o (Join-Path $out 'scope_backend.dll') ./backend/bridge
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    & $Odin build . -out:(Join-Path $out 'alicorn-scope.exe')
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    if ($LASTEXITCODE -ne 0) { throw "Scope backend build failed with exit code $LASTEXITCODE." }
+
+    Write-Host 'Building Alicorn Scope...'
+    $collection = "-collection:alicorn=$AlicornRoot"
+    & $Odin build . $collection "-out:$(Join-Path $out 'alicorn-scope.exe')"
+    if ($LASTEXITCODE -ne 0) { throw "Alicorn Scope build failed with exit code $LASTEXITCODE." }
 
     $caliberDll = Join-Path $CaliberRoot 'target\release\caliber_ffi.dll'
     if (-not (Test-Path -LiteralPath $caliberDll -PathType Leaf)) { throw "Caliber DLL not found: $caliberDll" }
     Copy-Item -LiteralPath $caliberDll -Destination (Join-Path $out 'caliber_ffi.dll') -Force
     $odinRoot = Split-Path -Parent $Odin
     $sdlDll = Join-Path $odinRoot 'vendor\sdl3\SDL3.dll'
-    if (-not (Test-Path -LiteralPath $sdlDll -PathType Leaf)) { throw "SDL3.dll was not found at $sdlDll" }
+    if (-not (Test-Path -LiteralPath $sdlDll -PathType Leaf)) { throw "SDL3.dll was not found in the Odin distribution at $sdlDll" }
     Copy-Item -LiteralPath $sdlDll -Destination (Join-Path $out 'SDL3.dll') -Force
+    Write-Host "Build complete: $(Join-Path $out 'alicorn-scope.exe')"
 } finally {
-    $env:CGO_ENABLED = $oldCgo
-    $env:GOCACHE = $oldCache
-    $env:GOTELEMETRY = $oldTelemetry
+    Pop-Location
+    if ($null -eq $oldCgo) { Remove-Item Env:CGO_ENABLED -ErrorAction SilentlyContinue } else { $env:CGO_ENABLED = $oldCgo }
+    if ($null -eq $oldCache) { Remove-Item Env:GOCACHE -ErrorAction SilentlyContinue } else { $env:GOCACHE = $oldCache }
+    if ($null -eq $oldTelemetry) { Remove-Item Env:GOTELEMETRY -ErrorAction SilentlyContinue } else { $env:GOTELEMETRY = $oldTelemetry }
 }

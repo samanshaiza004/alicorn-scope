@@ -2,7 +2,7 @@ package frontend
 
 import "core:fmt"
 import "core:strings"
-import alicorn "../../alicorn/runtime"
+import alicorn "alicorn:runtime"
 
 SCOPE_BACKGROUND       :: alicorn.Color{0.035, 0.045, 0.065, 1}
 SCOPE_PANEL_BACKGROUND :: alicorn.Color{0.055, 0.075, 0.115, 1}
