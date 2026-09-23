@@ -4,6 +4,7 @@ import "core:dynlib"
 import "core:encoding/json"
 import "core:fmt"
 import "core:mem"
+import math "core:math"
 import "core:os"
 import "core:path/filepath"
 import "core:strings"
@@ -891,18 +892,28 @@ scope_refresh_timeline_geometry :: proc(app: ^Scope_App, rt: ^alicorn.Runtime) {
 			}
 		}
 		peak_count: f64 = 1
-		for count in bucket_counts { peak_count = max(peak_count, count) }
+		peak_duration_sum: f64 = 0
+		for bucket in 0..<SCOPE_TIMELINE_DENSITY_BUCKETS {
+			peak_count = max(peak_count, bucket_counts[bucket])
+			peak_duration_sum = max(peak_duration_sum, bucket_duration_us[bucket])
+		}
 		bucket_width_px := width/f32(SCOPE_TIMELINE_DENSITY_BUCKETS)
 		bar_thickness := clamp(bucket_width_px*0.78, 2.5, 6)
 		for bucket in 0..<SCOPE_TIMELINE_DENSITY_BUCKETS {
 			count := bucket_counts[bucket]
-			occupancy := clamp(bucket_duration_us[bucket]/max(bucket_width_us, 0.000001), 0, 1)
-			if count <= 0 && occupancy <= 0 { continue }
-			count_level := count/peak_count
-			amplitude := max(occupancy, 0.20+0.80*count_level)
-			bar_height := max(3, f32(amplitude)*height*0.78)
+			duration_sum := bucket_duration_us[bucket]
+			if count <= 0 && duration_sum <= 0 { continue }
+			// Density, not accumulated nested duration, controls bar height.
+			// A square-root scale keeps busy buckets prominent without making
+			// every bin look saturated when many tracks are enabled.
+			count_level := math.sqrt(count/peak_count)
+			bar_height := max(3, f32(0.12+0.88*count_level)*height*0.78)
 			x := (f32(bucket)+0.5)*bucket_width_px
-			alpha := f32(0.58+0.42*count_level)
+			// Duration is only a relative tint cue: nested slices can overlap, so
+			// their sum is not physical track occupancy.
+			duration_level: f64 = 0
+			if peak_duration_sum > 0 { duration_level = math.sqrt(duration_sum/peak_duration_sum) }
+			alpha := f32(0.60+0.30*duration_level)
 			color := alicorn.Color{complete_color.r, complete_color.g, complete_color.b, alpha}
 			baseline_y := height-5
 			append(&segments, alicorn.GPU_Surface_Line_Segment{

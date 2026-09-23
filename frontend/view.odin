@@ -632,7 +632,7 @@ scope_render :: proc(view: ^Scope_View, rt: ^alicorn.Runtime) -> alicorn.Node_ID
 		label="scope-timeline-panel",
 		style=alicorn.layout_style(grow=1, gap=4, clip=true),
 	)
-	track_label := "All tracks"
+	track_label := "Overview"
 	if view.ui.has_selected_track {
 		track_label = "Selected track"
 		for track in view.tracks {
@@ -654,7 +654,7 @@ scope_render :: proc(view: ^Scope_View, rt: ^alicorn.Runtime) -> alicorn.Node_ID
 	alicorn.container_begin(&ui, .Container, label="scope-timeline-heading", style=alicorn.layout_style(.Row, height=28, gap=8, align=.Center))
 	if view.ui.has_selected_track && alicorn.button(
 		&ui,
-		"← All tracks",
+		"← Overview",
 		style=alicorn.layout_style(.Row, width=104, height=24),
 	) {
 		view.ui.has_selected_track = false
