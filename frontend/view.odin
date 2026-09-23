@@ -432,19 +432,24 @@ scope_render :: proc(view: ^Scope_View, rt: ^alicorn.Runtime) -> alicorn.Node_ID
 	)
 	alicorn.container_end(&ui)
 
-	alicorn.container_begin(
+	outer_split := alicorn.split_begin(
 		&ui,
-		.Container,
+		key=alicorn.key_string("scope-tracks-split"),
+		axis=.Horizontal,
+		initial=238,
+		min_first=150,
+		min_second=590,
+		style=alicorn.layout_style(grow=1, clip=true),
 		label="scope-panes",
-		style=alicorn.layout_style(.Row, grow=1, gap=10, clip=true),
 	)
+	alicorn.split_first_begin(&ui, outer_split)
 
 	// Tracks pane.
 	alicorn.container_begin(
 		&ui,
 		.Container,
 		label="scope-tracks-panel",
-		style=alicorn.layout_style(width=238, padding=8, gap=6, clip=true),
+		style=alicorn.layout_style(grow=1, padding=8, gap=6, clip=true),
 		color=SCOPE_PANEL_BACKGROUND,
 	)
 	alicorn.text(
@@ -533,13 +538,28 @@ scope_render :: proc(view: ^Scope_View, rt: ^alicorn.Runtime) -> alicorn.Node_ID
 		alicorn.text(&ui, "No tracks", style=alicorn.layout_style(.Row, height=28))
 	}
 	alicorn.container_end(&ui)
+	alicorn.split_first_end(&ui, outer_split)
+
+	alicorn.split_divider(&ui, outer_split)
+	alicorn.split_second_begin(&ui, outer_split)
+	inner_split := alicorn.split_begin(
+		&ui,
+		key=alicorn.key_string("scope-events-inspector-split"),
+		axis=.Horizontal,
+		initial=540,
+		min_first=300,
+		min_second=280,
+		style=alicorn.layout_style(grow=1, clip=true),
+		label="scope-events-inspector",
+	)
+	alicorn.split_first_begin(&ui, inner_split)
 
 	// Events pane.
 	alicorn.container_begin(
 		&ui,
 		.Container,
 		label="scope-events-panel",
-		style=alicorn.layout_style(width=540, padding=8, gap=6, clip=true),
+		style=alicorn.layout_style(grow=1, padding=8, gap=6, clip=true),
 		color=SCOPE_PANEL_BACKGROUND,
 	)
 	alicorn.text(
@@ -613,13 +633,17 @@ scope_render :: proc(view: ^Scope_View, rt: ^alicorn.Runtime) -> alicorn.Node_ID
 		}
 	}
 	alicorn.container_end(&ui)
+	alicorn.split_first_end(&ui, inner_split)
+
+	alicorn.split_divider(&ui, inner_split)
+	alicorn.split_second_begin(&ui, inner_split)
 
 	// Inspector pane.
 	alicorn.container_begin(
 		&ui,
 		.Container,
 		label="scope-inspector-panel",
-		style=alicorn.layout_style(grow=1, min_width=280, padding=8, gap=6, clip=true),
+		style=alicorn.layout_style(grow=1, padding=8, gap=6, clip=true),
 		color=SCOPE_PANEL_BACKGROUND,
 	)
 	alicorn.text(
@@ -686,7 +710,10 @@ scope_render :: proc(view: ^Scope_View, rt: ^alicorn.Runtime) -> alicorn.Node_ID
 	}
 	alicorn.container_end(&ui)
 
-	alicorn.container_end(&ui) // scope-panes
+	alicorn.split_second_end(&ui, inner_split)
+	alicorn.split_end(&ui, inner_split)
+	alicorn.split_second_end(&ui, outer_split)
+	alicorn.split_end(&ui, outer_split)
 	alicorn.container_end(&ui) // scope-root
 	alicorn.end_frame(&ui)
 
