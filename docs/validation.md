@@ -62,7 +62,6 @@ These measurements exclude Caliber transport and Odin decoding.
 
 This run was performed on Windows only. The macOS build, native open dialog,
 keyboard/track toggling, and the same 30-second idle proof remain to be run on
-the user's Mac. The Caliber wake ABI patch is currently an uncommitted change
-in the dependency worktree at the pinned base revision `abbe4f7`; commit/push
-that dependency change and update `dependencies.lock.json` before claiming a
-fresh-clone/recurse-submodules proof.
+the user's Mac. Caliber's blocking wake ABI has since been committed and pushed
+as `4814a5161809f37d07f8456b81988013f038867a`; `dependencies.lock.json` pins
+that revision so a clean checkout can build against the published ABI.

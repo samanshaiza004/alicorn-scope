@@ -20,7 +20,7 @@ foreach ($dependency in @(@{ name='Alicorn'; path=$AlicornRoot; revision=$lock.a
     }
 }
 if (-not (Select-String -Quiet -Path (Join-Path $CaliberRoot 'crates\caliber-ffi\src\lib.rs') -Pattern 'context_wait_wake|context_stop_wake_waiters')) {
-    throw 'Caliber wake ABI changes are missing. Apply the Scope Phase 1 wake patch before building.'
+    throw 'Pinned Caliber checkout is missing the blocking wake ABI.'
 }
 
 if (-not $Odin) { $Odin = 'odin' }

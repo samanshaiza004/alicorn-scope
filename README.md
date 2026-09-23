@@ -9,9 +9,8 @@ This repository pins Alicorn and Caliber to exact revisions. Caliber remains exp
 ## Build and run
 
 The application expects sibling checkouts `../alicorn` and `../caliber` at
-the revisions in [`dependencies.lock.json`](dependencies.lock.json). Caliber
-must also contain the Phase 1 blocking wake ABI extension documented in
-[`docs/phase-1.md`](docs/phase-1.md). On Windows, run `tools/build.ps1` and
+the revisions in [`dependencies.lock.json`](dependencies.lock.json), including
+Caliber's blocking wake ABI extension. On Windows, run `tools/build.ps1` and
 then `tools/run.ps1 --Trace <path-to-trace.json>`. On macOS/Linux, install the
 SDL3 development library first (the native host links `system:SDL3`; macOS
 requires SDL 3.4.16), then run `sh tools/build.sh` or

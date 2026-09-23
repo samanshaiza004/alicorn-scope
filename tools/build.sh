@@ -15,7 +15,7 @@ ACTUAL_CALIBER=$(git -C "$CALIBER_ROOT" rev-parse HEAD)
 [ "$ACTUAL_ALICORN" = "$LOCK_ALICORN" ] || { echo "Alicorn must be at $LOCK_ALICORN (found $ACTUAL_ALICORN)" >&2; exit 1; }
 [ "$ACTUAL_CALIBER" = "$LOCK_CALIBER" ] || { echo "Caliber must be at $LOCK_CALIBER (found $ACTUAL_CALIBER)" >&2; exit 1; }
 grep -q 'context_wait_wake\|context_stop_wake_waiters' "$CALIBER_ROOT/crates/caliber-ffi/src/lib.rs" || {
-    echo "Apply the Scope Phase 1 Caliber wake ABI change before building." >&2; exit 1;
+    echo "Pinned Caliber checkout is missing the blocking wake ABI." >&2; exit 1;
 }
 command -v "$ODIN" >/dev/null 2>&1 || { echo "Odin not found: $ODIN" >&2; exit 127; }
 command -v "$GO" >/dev/null 2>&1 || { echo "Go not found: $GO" >&2; exit 127; }

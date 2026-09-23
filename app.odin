@@ -112,6 +112,8 @@ Scope_App :: struct {
 	wake_count: u64,
 	resource_copy_count: u64,
 	error: string,
+	dialog_error: string,
+	dialog_error_owned: bool,
 }
 
 scope_app_new :: proc(backend: Scope_Backend_API, trace_path: string) -> ^Scope_App {
@@ -166,6 +168,7 @@ scope_app_destroy :: proc(app: ^Scope_App) {
 	if app.view.ui.filter_owned && len(app.view.filter) > 0 { delete(app.view.filter) }
 	if len(app.requested_trace) > 0 { delete(app.requested_trace) }
 	if len(app.error) > 0 { delete(app.error) }
+	if app.dialog_error_owned && len(app.dialog_error) > 0 { delete(app.dialog_error) }
 	if len(app.progress_message) > 0 { delete(app.progress_message) }
 	if len(app.view.trace_summary) > 0 { delete(app.view.trace_summary) }
 	delete(app.state_bytes)
@@ -484,7 +487,8 @@ scope_open_trace :: proc(app: ^Scope_App, path: string) -> bool {
 }
 
 scope_open_trace_dialog :: proc(app: ^Scope_App, rt: ^alicorn.Runtime) {
-	filters := []host.Dialog_Filter{{name="Chrome Trace Event JSON", pattern="*.json"}}
+	// SDL file-dialog filters take extension tokens, not shell globs.
+	filters := []host.Dialog_Filter{{name="Chrome Trace Event JSON", pattern="json"}}
 	request := host.File_Dialog_Request{
 		id=host.Dialog_ID(1),
 		kind=.Open_File,
@@ -496,9 +500,29 @@ scope_open_trace_dialog :: proc(app: ^Scope_App, rt: ^alicorn.Runtime) {
 		cancel_label="Cancel",
 	}
 	if !host.ShowFileDialog(app.dialogs, request) {
-		app.error = "Trace dialog is busy or unavailable"
-		alicorn.invalidate_root(rt, "scope trace dialog unavailable")
+		scope_report_dialog_error(app, rt, "Trace dialog is busy or unavailable")
 	}
+}
+
+scope_report_dialog_error :: proc(app: ^Scope_App, rt: ^alicorn.Runtime, message: string) {
+	if app.dialog_error_owned && len(app.dialog_error) > 0 {
+		delete(app.dialog_error)
+	}
+	app.dialog_error = ""
+	app.dialog_error_owned = false
+	if len(message) > 0 {
+		copy, err := strings.clone(message, allocator=context.allocator)
+		if err == nil {
+			app.dialog_error = copy
+			app.dialog_error_owned = true
+		}
+	}
+	if len(app.dialog_error) == 0 {
+		app.dialog_error = "Native file dialog failed"
+	}
+	app.view.load_status = .Failed
+	app.view.load_message = app.dialog_error
+	alicorn.invalidate_root(rt, "scope native file dialog failed")
 }
 
 scope_consume_interaction :: proc(app: ^Scope_App, rt: ^alicorn.Runtime) {
@@ -582,7 +606,16 @@ scope_on_services :: proc(state: rawptr, services: host.Application_Services) {
 
 scope_on_dialog :: proc(state: rawptr, rt: ^alicorn.Runtime, result: ^host.File_Dialog_Result) {
 	app := cast(^Scope_App)state
-	if result == nil || result.status != .Accepted || len(result.paths) == 0 { return }
+	if result == nil { return }
+	switch result.status {
+	case .Cancelled:
+		return
+	case .Error:
+		scope_report_dialog_error(app, rt, result.error)
+		return
+	case .Accepted:
+		if len(result.paths) == 0 { return }
+	}
 	if !scope_open_trace(app, result.paths[0]) {
 		app.view.load_status = .Failed
 		app.view.load_message = "Could not submit trace load request"
