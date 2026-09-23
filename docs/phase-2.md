@@ -5,10 +5,12 @@
 Scope adds a time-indexed view beside the existing event table. Go keeps the
 immutable trace and per-track indexes; Odin owns the viewport transform and
 gesture state; Caliber carries one coalesced timeline request and one bounded
-`SCTW` resource. A timeline request uses track ID `0` for all enabled tracks,
-or a stable track ID for a single track. For catalogs larger than the first
-512-track page, Scope requests the selected track so timeline rows remain
-bounded and addressable.
+`SCTW` resource. A timeline request uses track ID `0` for all enabled tracks
+when no track is selected, or the stable selected track ID for a focused
+detailed lane. Track selection therefore changes the timeline at every catalog
+size, not only when the track list exceeds its first 512-row page. The
+unselected view presents a single collapsed all-track density overview; the
+event table remains the place to inspect exact rows until a track is selected.
 
 `Model.TraceBounds` returns the earliest event timestamp through the latest
 complete-event end. Per-track interval indexes are sorted by `(timestamp,
@@ -18,10 +20,14 @@ events. Windows use `[start,end)` semantics.
 
 At most 128 matching events cross as raw identities. Above that threshold Go
 emits temporal summaries with a shared 512-row budget across tracks. The
-frontend projects raw complete events as spans and instant events as markers;
-aggregate rows become per-track density bars. The same stable event ID selects
-the inspector and reveals the corresponding event-table row. No trace-sized
-timeline payload or per-event foreign calls are used.
+frontend projects raw complete events as spans and instant events as markers
+in the selected track's full-height lane. Aggregate rows are combined into a
+bounded 128-bin density overview (or focused-track density), with occupancy and
+event count shaping the bars. A dark plot backing, restrained time grid/ruler,
+and selected-event cursor make the visualization legible independently of the
+event table. The same stable event ID selects the inspector and reveals the
+corresponding event-table row. No trace-sized timeline payload or per-event
+foreign calls are used.
 
 ### `SCTW` timeline resource, version 1
 

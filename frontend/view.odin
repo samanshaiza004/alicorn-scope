@@ -7,6 +7,7 @@ import alicorn "alicorn:runtime"
 SCOPE_BACKGROUND       :: alicorn.Color{0.035, 0.045, 0.065, 1}
 SCOPE_PANEL_BACKGROUND :: alicorn.Color{0.055, 0.075, 0.115, 1}
 SCOPE_HEADER_BACKGROUND :: alicorn.Color{0.08, 0.13, 0.22, 1}
+SCOPE_TIMELINE_BACKGROUND :: alicorn.Color{0.025, 0.033, 0.050, 1}
 
 SCOPE_TRACK_ROW_HEIGHT :: f32(34)
 SCOPE_EVENT_ROW_HEIGHT :: f32(46)
@@ -159,17 +160,13 @@ Scope_View :: struct {
 }
 
 scope_timeline_track_y :: proc(view: Scope_View, track_id: u64, height: f32) -> (y: f32, found: bool) {
-	track_count := max(len(view.tracks), 1)
-	row_height := height/f32(track_count)
-	for track, local_index in view.tracks {
-		if track.id == track_id {
-			return min((f32(local_index)+0.5)*row_height, max(height-1, 0)), true
-		}
+	if view.ui.has_selected_track && track_id != view.ui.selected_track_id {
+		return 0, false
 	}
-	if track_id != 0 && view.timeline_cache_track_id == track_id {
-		return height*0.5, true
-	}
-	return 0, false
+	// The timeline is either a focused single-track lane or a collapsed
+	// all-track overview. It is deliberately not a compressed copy of the
+	// independently virtualized track list.
+	return height*0.5, true
 }
 
 Scope_Navigation_Key :: enum {
@@ -568,6 +565,11 @@ scope_render :: proc(view: ^Scope_View, rt: ^alicorn.Runtime) -> alicorn.Node_ID
 				view.ui.has_pending_navigation_row = false
 				view.timeline_revision += 1
 				if view.timeline_revision == 0 { view.timeline_revision = 1 }
+				// A queued all-track/previous-track response must not keep the
+				// focused lane waiting or paint stale geometry while it returns.
+				view.timeline_request_pending = false
+				view.timeline_ready = false
+				view.timeline_mode = .None
 			}
 			scope_publish_interaction(view, .Track_Selected, track.id, 0)
 			selection_changed = true
@@ -630,26 +632,74 @@ scope_render :: proc(view: ^Scope_View, rt: ^alicorn.Runtime) -> alicorn.Node_ID
 		label="scope-timeline-panel",
 		style=alicorn.layout_style(grow=1, gap=4, clip=true),
 	)
-	track_label := "all enabled tracks"
-	if view.track_first_row >= 512 { track_label = "selected track · large catalog" }
+	track_label := "All enabled tracks · overview"
+	if view.ui.has_selected_track {
+		track_label = "Selected track"
+		for track in view.tracks {
+			if track.id == view.ui.selected_track_id {
+				track_label = track.name
+				break
+			}
+		}
+	}
 	mode_label := "Loading time window..."
 	if view.timeline_ready {
-		mode_label = fmt.tprintf("%d events in range", view.timeline_total_events)
-		if view.timeline_mode == .Aggregate { mode_label = fmt.tprintf("Aggregated · %d events", view.timeline_total_events) }
+		if !view.ui.has_selected_track {
+			mode_label = fmt.tprintf("Overview · %d events", view.timeline_total_events)
+		} else {
+			mode_label = fmt.tprintf("%d events in range", view.timeline_total_events)
+			if view.timeline_mode == .Aggregate { mode_label = fmt.tprintf("Density · %d events", view.timeline_total_events) }
+		}
 	}
 	alicorn.container_begin(&ui, .Container, label="scope-timeline-heading", style=alicorn.layout_style(.Row, height=28, gap=8, align=.Center))
+	if view.ui.has_selected_track && alicorn.button(
+		&ui,
+		"All tracks",
+		style=alicorn.layout_style(.Row, width=82, height=24),
+	) {
+		view.ui.has_selected_track = false
+		view.ui.selected_track_id = 0
+		view.ui.has_selected_event = false
+		view.ui.selected_event_id = 0
+		view.ui.has_selected_event_row = false
+		view.ui.has_pending_navigation_row = false
+		view.timeline_request_pending = false
+		view.timeline_ready = false
+		view.timeline_mode = .None
+		view.timeline_revision += 1
+		if view.timeline_revision == 0 { view.timeline_revision = 1 }
+		scope_publish_interaction(view, .Track_Selected, 0, 0)
+		selection_changed = true
+	}
 	alicorn.text(&ui, fmt.tprintf("Timeline  ·  %s", track_label), style=alicorn.layout_style(.Row, grow=1), text_style=alicorn.Text_Style{font_weight=alicorn.FONT_WEIGHT_SEMIBOLD, overflow=.Ellipsis})
 	alicorn.text(&ui, mode_label, style=alicorn.layout_style(.Row, height=24), text_style=alicorn.Text_Style{overflow=.Ellipsis})
 	alicorn.container_end(&ui)
-	if !view.ui.has_selected_track {
-		alicorn.text(&ui, "Select a track to view its events over time", style=alicorn.layout_style(.Row, height=24))
+	span_us := max(view.timeline_end_us-view.timeline_start_us, 1)
+	alicorn.container_begin(&ui, .Container, label="scope-timeline-ruler", style=alicorn.layout_style(.Row, height=22), color=SCOPE_PANEL_BACKGROUND)
+	for tick := 0; tick <= 4; tick += 1 {
+		offset_ms := span_us*f64(tick)/4.0/1000.0
+		alicorn.text(
+			&ui,
+			fmt.tprintf("+%.2f ms", offset_ms),
+			style=alicorn.layout_style(.Row, grow=1, height=22),
+			text_style=alicorn.Text_Style{overflow=.Ellipsis},
+		)
 	}
+	alicorn.container_end(&ui)
+	alicorn.container_begin(
+		&ui,
+		.Container,
+		label="scope-timeline-plot-background",
+		style=alicorn.layout_style(grow=1, clip=true),
+		color=SCOPE_TIMELINE_BACKGROUND,
+	)
 	view.ui.timeline_surface_node = alicorn.gpu_geometry_surface(
 		&ui,
 		"scope-timeline-geometry",
 		0,
 		alicorn.layout_style(grow=1, clip=true),
 	)
+	alicorn.container_end(&ui)
 	alicorn.container_end(&ui)
 	alicorn.split_first_end(&ui, timeline_split)
 	alicorn.split_divider(&ui, timeline_split)

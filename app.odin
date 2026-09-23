@@ -15,6 +15,7 @@ import host "alicorn:native/sdl_gpu"
 
 SCOPE_RESOURCE_LIMIT :: 1 << 20
 SCOPE_EVENT_WINDOW_ROWS :: 512
+SCOPE_TIMELINE_DENSITY_BUCKETS :: 128
 
 Caliber_Status_OK      :: i32(0)
 Caliber_Status_Stopped :: i32(11)
@@ -582,7 +583,7 @@ scope_request_timeline :: proc(app: ^Scope_App) -> bool {
 		return false
 	}
 	requested_track_id: u64 = 0
-	if view.track_first_row >= SCOPE_EVENT_WINDOW_ROWS && view.ui.has_selected_track {
+	if view.ui.has_selected_track {
 		requested_track_id = view.ui.selected_track_id
 	}
 	if view.timeline_ready && view.timeline_cache_track_id == requested_track_id &&
@@ -724,6 +725,9 @@ scope_consume_interaction :: proc(app: ^Scope_App, rt: ^alicorn.Runtime) {
 		if interaction.enabled { enabled = 1 }
 		_ = app.backend.set_track_enabled(app.state.trace_generation, interaction.track_id, enabled)
 	case .Track_Selected:
+		// Track focus clears the prior event selection in the frontend; keep
+		// the backend's committed inspector state in sync as well.
+		_ = app.backend.select_event(app.state.trace_generation, interaction.event_id)
 		_ = scope_request_timeline(app)
 	case .Track_Window_Requested:
 		first := u64(max(0, interaction.first_row))
@@ -809,48 +813,115 @@ scope_refresh_timeline_geometry :: proc(app: ^Scope_App, rt: ^alicorn.Runtime) {
 	selected_color := alicorn.Color{0.96, 0.98, 1.0, 1}
 	complete_color := alicorn.Color{0.18, 0.76, 0.96, 0.94}
 	instant_color := alicorn.Color{0.98, 0.67, 0.24, 1}
-	if app.view.timeline_ready && app.view.timeline_mode == .Raw {
+	grid_color := alicorn.Color{0.16, 0.20, 0.28, 0.72}
+	center_y := height*0.5
+	// A restrained ruler grid gives both the overview and focused lane a clear
+	// time axis without turning the plot into a charting framework.
+	for tick := 0; tick <= 4; tick += 1 {
+		x := width*f32(tick)/4
+		append(&segments, alicorn.GPU_Surface_Line_Segment{start={x, 4}, end={x, height-4}, thickness=1, color=grid_color})
+	}
+	for lane := 1; lane <= 3; lane += 1 {
+		y := height*f32(lane)/4
+		append(&segments, alicorn.GPU_Surface_Line_Segment{start={4, y}, end={width-4, y}, thickness=1, color=grid_color})
+	}
+	if app.view.timeline_ready && app.view.timeline_mode == .Raw && app.view.ui.has_selected_track {
 		for row in app.view.timeline_rows {
+			if row.track_id != app.view.ui.selected_track_id { continue }
+			if row.timestamp_us >= app.view.timeline_end_us || row.timestamp_us+row.duration_us < app.view.timeline_start_us { continue }
 			y, found := frontend.scope_timeline_track_y(app.view, row.track_id, height)
 			if !found { continue }
 			x := f32((row.timestamp_us-app.view.timeline_start_us)/span)*width
 			x = clamp(x, 0, width)
 			color := complete_color
-			if row.track_id == app.view.ui.selected_track_id { color = alicorn.Color{0.26, 0.88, 0.98, 1} }
 			if row.event_id == app.view.ui.selected_event_id { color = selected_color }
 			if row.kind == 2 {
-				append(&circles, alicorn.GPU_Surface_Filled_Circle{center={x, y}, radius=3.4, color=instant_color})
-				if row.event_id == app.view.ui.selected_event_id {
-					append(&circles, alicorn.GPU_Surface_Filled_Circle{center={x, y}, radius=4.8, color=selected_color})
-				}
+				append(&circles, alicorn.GPU_Surface_Filled_Circle{center={x, y}, radius=4, color=instant_color})
 			} else {
 				x_end := f32((row.timestamp_us+row.duration_us-app.view.timeline_start_us)/span)*width
 				x_end = clamp(x_end, 0, width)
 				if x_end-x < 1 { x_end = min(width, x+1) }
 				if x_end > x {
-					append(&segments, alicorn.GPU_Surface_Line_Segment{start={x, y}, end={x_end, y}, thickness=5, color=color})
+					thickness := f32(5)
+					if row.event_id == app.view.ui.selected_event_id { thickness = 7 }
+					append(&segments, alicorn.GPU_Surface_Line_Segment{start={x, y}, end={x_end, y}, thickness=thickness, color=color})
 				}
 			}
 		}
-	} else if app.view.timeline_ready && app.view.timeline_mode == .Aggregate {
-		peak: u64 = 1
-		for row in app.view.timeline_rows { peak = max(peak, row.event_count) }
-		for row in app.view.timeline_rows {
-			if row.event_count == 0 { continue }
-			center_y, found := frontend.scope_timeline_track_y(app.view, row.track_id, height)
-			if !found { continue }
-			center_us := (row.bucket_start_us+row.bucket_end_us)*0.5
-			x := f32((center_us-app.view.timeline_start_us)/span)*width
-			amplitude := min(f32(row.event_count)/f32(peak), 1)
-			track_height := height/f32(max(1, len(app.view.tracks)))
-			bar_height := max(2, amplitude*max(track_height-2, 2))
-			color := complete_color
-			if row.track_id == app.view.ui.selected_track_id { color = alicorn.Color{0.26, 0.88, 0.98, 1} }
+	} else if app.view.timeline_ready {
+		// The unselected view is a single all-track density overview. Focused
+		// aggregate mode passes through the same bins, but contains one track.
+		// This keeps drawing bounded and avoids squeezing dozens of unrelated
+		// lanes into a few pixels.
+		bucket_counts: [SCOPE_TIMELINE_DENSITY_BUCKETS]f64
+		bucket_duration_us: [SCOPE_TIMELINE_DENSITY_BUCKETS]f64
+		bucket_width_us := span/f64(SCOPE_TIMELINE_DENSITY_BUCKETS)
+		if app.view.timeline_mode == .Aggregate {
+			for row in app.view.timeline_rows {
+				visible_start := max(row.bucket_start_us, app.view.timeline_start_us)
+				visible_end := min(row.bucket_end_us, app.view.timeline_end_us)
+				if visible_end <= visible_start { continue }
+				center_us := (visible_start+visible_end)*0.5
+				index := int((center_us-app.view.timeline_start_us)/span*f64(SCOPE_TIMELINE_DENSITY_BUCKETS))
+				index = clamp(index, 0, SCOPE_TIMELINE_DENSITY_BUCKETS-1)
+				bucket_fraction := (visible_end-visible_start)/max(row.bucket_end_us-row.bucket_start_us, 0.000001)
+				bucket_counts[index] += f64(row.event_count)*bucket_fraction
+				bucket_duration_us[index] += row.duration_sum_us*bucket_fraction
+			}
+		} else {
+			for row in app.view.timeline_rows {
+				if row.timestamp_us >= app.view.timeline_end_us || row.timestamp_us+row.duration_us < app.view.timeline_start_us { continue }
+				visible_timestamp := max(row.timestamp_us, app.view.timeline_start_us)
+				index := int((visible_timestamp-app.view.timeline_start_us)/span*f64(SCOPE_TIMELINE_DENSITY_BUCKETS))
+				index = clamp(index, 0, SCOPE_TIMELINE_DENSITY_BUCKETS-1)
+				bucket_counts[index] += 1
+				if row.kind != 1 || row.duration_us <= 0 { continue }
+				overlap_start := max(row.timestamp_us, app.view.timeline_start_us)
+				overlap_end := min(row.timestamp_us+row.duration_us, app.view.timeline_end_us)
+				if overlap_end <= overlap_start { continue }
+				first_bucket := int((overlap_start-app.view.timeline_start_us)/span*f64(SCOPE_TIMELINE_DENSITY_BUCKETS))
+				last_bucket := int((overlap_end-app.view.timeline_start_us)/span*f64(SCOPE_TIMELINE_DENSITY_BUCKETS))
+				first_bucket = clamp(first_bucket, 0, SCOPE_TIMELINE_DENSITY_BUCKETS-1)
+				last_bucket = clamp(last_bucket, 0, SCOPE_TIMELINE_DENSITY_BUCKETS-1)
+				for bucket := first_bucket; bucket <= last_bucket; bucket += 1 {
+					bucket_start := app.view.timeline_start_us+f64(bucket)*bucket_width_us
+					bucket_end := bucket_start+bucket_width_us
+					bucket_duration_us[bucket] += max(0, min(overlap_end, bucket_end)-max(overlap_start, bucket_start))
+				}
+			}
+		}
+		peak_count: f64 = 1
+		for count in bucket_counts { peak_count = max(peak_count, count) }
+		bucket_width_px := width/f32(SCOPE_TIMELINE_DENSITY_BUCKETS)
+		bar_thickness := clamp(bucket_width_px*0.78, 2.5, 6)
+		for bucket in 0..<SCOPE_TIMELINE_DENSITY_BUCKETS {
+			count := bucket_counts[bucket]
+			occupancy := clamp(bucket_duration_us[bucket]/max(bucket_width_us, 0.000001), 0, 1)
+			if count <= 0 && occupancy <= 0 { continue }
+			count_level := count/peak_count
+			amplitude := max(occupancy, 0.20+0.80*count_level)
+			bar_height := max(3, f32(amplitude)*height*0.78)
+			x := (f32(bucket)+0.5)*bucket_width_px
+			alpha := f32(0.58+0.42*count_level)
+			color := alicorn.Color{complete_color.r, complete_color.g, complete_color.b, alpha}
 			append(&segments, alicorn.GPU_Surface_Line_Segment{
 				start={x, center_y+bar_height*0.5}, end={x, center_y-bar_height*0.5},
-				thickness=max(1.2, width/f32(max(1, len(app.view.timeline_rows)))*0.72),
+				thickness=bar_thickness,
 				color=color,
 			})
+		}
+	}
+	// Give a selected raw event both a lane marker and a vertical cursor. Only
+	// draw this when its stable ID is present in the focused raw window.
+	if app.view.ui.has_selected_track && app.view.timeline_ready && app.view.timeline_mode == .Raw {
+		for row in app.view.timeline_rows {
+			if row.event_id != app.view.ui.selected_event_id { continue }
+			x := f32((row.timestamp_us-app.view.timeline_start_us)/span)*width
+			if x >= 0 && x <= width {
+				append(&segments, alicorn.GPU_Surface_Line_Segment{start={x, 7}, end={x, height-7}, thickness=1.5, color=alicorn.Color{0.96, 0.98, 1.0, 0.48}})
+				append(&circles, alicorn.GPU_Surface_Filled_Circle{center={x, center_y}, radius=5.2, color=selected_color})
+			}
+			break
 		}
 	}
 	if alicorn.gpu_surface_update_geometry(rt, id, app.view.timeline_revision, segments[:], circles[:]) {
@@ -860,11 +931,12 @@ scope_refresh_timeline_geometry :: proc(app: ^Scope_App, rt: ^alicorn.Runtime) {
 }
 
 scope_timeline_hit_test :: proc(view: frontend.Scope_View, x, y, width, height: f32) -> (event_id: u64, found: bool) {
-	if !view.timeline_ready || view.timeline_mode != .Raw || width <= 0 || height <= 0 { return 0, false }
+	if !view.ui.has_selected_track || !view.timeline_ready || view.timeline_mode != .Raw || width <= 0 || height <= 0 { return 0, false }
 	span := view.timeline_end_us-view.timeline_start_us
 	if span <= 0 { return 0, false }
 	best_score := f32(10*10)
 	for row in view.timeline_rows {
+		if row.track_id != view.ui.selected_track_id || row.timestamp_us >= view.timeline_end_us || row.timestamp_us+row.duration_us < view.timeline_start_us { continue }
 		center_y, found := frontend.scope_timeline_track_y(view, row.track_id, height)
 		if !found { continue }
 		start_x := clamp(f32((row.timestamp_us-view.timeline_start_us)/span)*width, 0, width)
