@@ -434,15 +434,26 @@ scope_render :: proc(view: ^Scope_View, rt: ^alicorn.Runtime) -> alicorn.Node_ID
 
 	outer_split := alicorn.split_begin(
 		&ui,
-		key=alicorn.key_string("scope-tracks-split"),
+		key=alicorn.key_string("scope-workspace-inspector-split"),
+		axis=.Horizontal,
+		initial=800,
+		min_first=452,
+		min_second=280,
+		style=alicorn.layout_style(grow=1, clip=true),
+		label="scope-workspace-inspector",
+	)
+	alicorn.split_first_begin(&ui, outer_split)
+	inner_split := alicorn.split_begin(
+		&ui,
+		key=alicorn.key_string("scope-tracks-events-split"),
 		axis=.Horizontal,
 		initial=238,
 		min_first=150,
-		min_second=590,
+		min_second=300,
 		style=alicorn.layout_style(grow=1, clip=true),
-		label="scope-panes",
+		label="scope-tracks-events",
 	)
-	alicorn.split_first_begin(&ui, outer_split)
+	alicorn.split_first_begin(&ui, inner_split)
 
 	// Tracks pane.
 	alicorn.container_begin(
@@ -538,21 +549,9 @@ scope_render :: proc(view: ^Scope_View, rt: ^alicorn.Runtime) -> alicorn.Node_ID
 		alicorn.text(&ui, "No tracks", style=alicorn.layout_style(.Row, height=28))
 	}
 	alicorn.container_end(&ui)
-	alicorn.split_first_end(&ui, outer_split)
-
-	alicorn.split_divider(&ui, outer_split)
-	alicorn.split_second_begin(&ui, outer_split)
-	inner_split := alicorn.split_begin(
-		&ui,
-		key=alicorn.key_string("scope-events-inspector-split"),
-		axis=.Horizontal,
-		initial=540,
-		min_first=300,
-		min_second=280,
-		style=alicorn.layout_style(grow=1, clip=true),
-		label="scope-events-inspector",
-	)
-	alicorn.split_first_begin(&ui, inner_split)
+	alicorn.split_first_end(&ui, inner_split)
+	alicorn.split_divider(&ui, inner_split)
+	alicorn.split_second_begin(&ui, inner_split)
 
 	// Events pane.
 	alicorn.container_begin(
@@ -633,10 +632,11 @@ scope_render :: proc(view: ^Scope_View, rt: ^alicorn.Runtime) -> alicorn.Node_ID
 		}
 	}
 	alicorn.container_end(&ui)
-	alicorn.split_first_end(&ui, inner_split)
-
-	alicorn.split_divider(&ui, inner_split)
-	alicorn.split_second_begin(&ui, inner_split)
+	alicorn.split_second_end(&ui, inner_split)
+	alicorn.split_end(&ui, inner_split)
+	alicorn.split_first_end(&ui, outer_split)
+	alicorn.split_divider(&ui, outer_split)
+	alicorn.split_second_begin(&ui, outer_split)
 
 	// Inspector pane.
 	alicorn.container_begin(
@@ -710,8 +710,6 @@ scope_render :: proc(view: ^Scope_View, rt: ^alicorn.Runtime) -> alicorn.Node_ID
 	}
 	alicorn.container_end(&ui)
 
-	alicorn.split_second_end(&ui, inner_split)
-	alicorn.split_end(&ui, inner_split)
 	alicorn.split_second_end(&ui, outer_split)
 	alicorn.split_end(&ui, outer_split)
 	alicorn.container_end(&ui) // scope-root
