@@ -1,0 +1,9 @@
+{
+  "traceEvents": [
+    {"ph":"M","name":"process_name","pid":7,"args":{"name":"Scope smoke"}},
+    {"ph":"M","name":"thread_name","pid":7,"tid":2,"args":{"name":"Main thread"}},
+    {"ph":"X","name":"startup","cat":"lifecycle","ts":1000,"dur":250,"pid":7,"tid":2,"args":{"ok":true,"note":"ready ✓"}},
+    {"ph":"I","name":"opened trace","cat":"ui","ts":1400,"pid":7,"tid":2,"args":{"source":"argument"}},
+    {"ph":"B","name":"unsupported example","ts":1500,"pid":7,"tid":2}
+  ]
+}
