@@ -355,9 +355,26 @@ func (b *parseBuilder) finish() {
 		return a.ID < c.ID
 	})
 	clear(b.model.eventIndexByOrdinal)
+	b.model.traceStartUS = 0
+	b.model.traceEndUS = 0
+	b.model.hasTraceBounds = false
 	for i := range b.model.events {
-		b.model.eventIndexByOrdinal[b.model.events[i].ID] = i
+		event := b.model.events[i].Event
+		b.model.eventIndexByOrdinal[event.ID] = i
+		endUS := eventEndUS(event)
+		if !b.model.hasTraceBounds {
+			b.model.traceStartUS, b.model.traceEndUS = event.TimestampUS, endUS
+			b.model.hasTraceBounds = true
+		} else {
+			if event.TimestampUS < b.model.traceStartUS {
+				b.model.traceStartUS = event.TimestampUS
+			}
+			if endUS > b.model.traceEndUS {
+				b.model.traceEndUS = endUS
+			}
+		}
 	}
+	b.model.trackEventIndices = buildTrackEventIndex(b.model.events)
 }
 
 func makeTrackKey(pidRaw, tidRaw json.RawMessage) (trackKey, error) {

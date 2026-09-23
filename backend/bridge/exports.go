@@ -165,6 +165,13 @@ func Scope_RequestEventWindow(traceGeneration C.uint64_t, queryGeneration C.uint
 	})
 }
 
+//export Scope_RequestTimelineWindow
+func Scope_RequestTimelineWindow(traceGeneration C.uint64_t, queryGeneration C.uint64_t, trackID C.uint64_t, startUS C.double, endUS C.double, resolution C.uint32_t) C.int32_t {
+	return exportStatus(func() int32 {
+		return backendDispatchTimeline(uint64(traceGeneration), uint64(queryGeneration), uint64(trackID), float64(startUS), float64(endUS), uint32(resolution))
+	})
+}
+
 //export Scope_ReadState
 func Scope_ReadState(dst *C.uint8_t, capacity C.size_t, outLength *C.size_t, revision *C.uint64_t, schema *C.uint32_t) C.int32_t {
 	if outLength == nil || revision == nil || schema == nil || (capacity != 0 && dst == nil) {

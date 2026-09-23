@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 )
 
@@ -49,6 +50,10 @@ func TestParseEnvelopeMetadataOrderingAndStableIdentity(t *testing.T) {
 	for i, want := range wantOrdinals {
 		if page.Rows[i].ID != want {
 			t.Fatalf("row %d ID=%d, want source ordinal %d", i, page.Rows[i].ID, want)
+		}
+		row, found := all.RowForEventID(want)
+		if !found || row != uint64(i) {
+			t.Fatalf("stable event %d maps to query row %d (found=%t), want %d", want, row, found, i)
 		}
 	}
 	if page.Rows[3].TimestampUS != 20.5 || page.Rows[3].DurationUS != 3.25 || page.Rows[3].Kind != EventComplete {
@@ -177,6 +182,182 @@ func TestQueriesFilterTracksAndClampWindows(t *testing.T) {
 	}
 	if model.NewEventQuery(nil, "render").Count() != 1 {
 		t.Fatal("nil enabled-track set should mean all tracks")
+	}
+	if _, found := model.NewEventQuery(nil, "render").RowForEventID(1); found {
+		t.Fatal("filtered-out event unexpectedly resolved to a query row")
+	}
+}
+
+func TestTimelineWindowUsesTrackIntervalIndexAndTraceBounds(t *testing.T) {
+	input := `[
+		{"ph":"X","name":"crossing","ts":0,"dur":20,"pid":1,"tid":1},
+		{"ph":"I","name":"at-start","ts":10,"pid":1,"tid":1},
+		{"ph":"X","name":"tie-b","ts":12,"dur":2,"pid":1,"tid":1},
+		{"ph":"X","name":"tie-a","ts":12,"dur":1,"pid":1,"tid":1},
+		{"ph":"X","name":"outside","ts":20,"dur":1,"pid":1,"tid":1},
+		{"ph":"I","name":"other-track","ts":13,"pid":2,"tid":1}
+	]`
+	model, err := Parse(strings.NewReader(input), 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start, end, ok := model.TraceBounds()
+	if !ok || start != 0 || end != 21 {
+		t.Fatalf("trace bounds=(%v,%v,%v), want (0,21,true)", start, end, ok)
+	}
+	tracks := model.TrackWindow(0, 512).Rows
+	var trackID uint64
+	for _, track := range tracks {
+		if track.PID == 1 {
+			trackID = track.ID
+		}
+	}
+	query := model.NewEventQuery([]uint64{trackID}, "")
+	window := query.TimelineWindow(trackID, 10, 15, 16, 8, 9)
+	wantIDs := []uint64{0, 1, 2, 3}
+	if window.Mode != TimelineRaw || window.TotalEventCount != uint64(len(wantIDs)) || len(window.Rows) != len(wantIDs) {
+		t.Fatalf("unexpected time query shape: %+v", window)
+	}
+	for i, want := range wantIDs {
+		if window.Rows[i].EventID != want {
+			t.Errorf("timeline row %d id=%d, want %d", i, window.Rows[i].EventID, want)
+		}
+	}
+	if got := query.TimelineWindow(trackID, 10, 15, 4, 8, 9).TotalEventCount; got != 4 {
+		t.Fatalf("resolution hint changed raw match count: %d", got)
+	}
+	if got := query.TimelineWindow(tracks[1].ID, 10, 15, 8, 8, 9).TotalEventCount; got != 0 {
+		t.Fatalf("disabled track returned timeline events: %d", got)
+	}
+	allTracks := model.NewEventQuery(nil, "").TimelineWindow(0, 0, 21, 16, 8, 9)
+	if allTracks.TotalEventCount != 6 || len(allTracks.Rows) != 6 {
+		t.Fatalf("all-track timeline returned %d events in %d rows, want 6", allTracks.TotalEventCount, len(allTracks.Rows))
+	}
+	seenTracks := map[uint64]bool{}
+	for _, row := range allTracks.Rows {
+		seenTracks[row.TrackID] = true
+	}
+	if len(seenTracks) != 2 {
+		t.Fatalf("all-track timeline represented %d tracks, want 2", len(seenTracks))
+	}
+	filtered := model.NewEventQuery([]uint64{trackID}, "tie")
+	if got := filtered.TimelineWindow(trackID, 10, 15, 8, 8, 10).TotalEventCount; got != 2 {
+		t.Fatalf("timeline did not honor the immutable query filter: %d", got)
+	}
+	if got := query.TimelineWindow(trackID, math.NaN(), 15, 8, 8, 9); len(got.Rows) != 0 {
+		t.Fatal("invalid time range should produce an empty bounded window")
+	}
+}
+
+func TestTimelineWindowSwitchesToBoundedAggregates(t *testing.T) {
+	var input strings.Builder
+	input.WriteByte('[')
+	for i := range MaxTimelineRawEvents + 23 {
+		if i > 0 {
+			input.WriteByte(',')
+		}
+		fmt.Fprintf(&input, `{"ph":"X","name":"event","ts":%d,"dur":2,"pid":1,"tid":1}`, i)
+	}
+	input.WriteByte(']')
+	model, err := Parse(strings.NewReader(input.String()), 17)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trackID := model.tracks[0].ID
+	query := model.NewEventQuery(nil, "")
+	window := query.TimelineWindow(trackID, 0, MaxTimelineRawEvents+23, 48, 17, 21)
+	if window.Mode != TimelineAggregate || window.TotalEventCount != MaxTimelineRawEvents+23 || len(window.Rows) != 48 {
+		t.Fatalf("unbounded or incorrect aggregate response: mode=%d total=%d rows=%d", window.Mode, window.TotalEventCount, len(window.Rows))
+	}
+	var aggregated uint64
+	for _, row := range window.Rows {
+		aggregated += row.EventCount
+	}
+	if aggregated != window.TotalEventCount {
+		t.Fatalf("aggregate buckets contain %d events, want %d", aggregated, window.TotalEventCount)
+	}
+}
+
+func TestAllTrackTimelineAggregationStaysWithinSharedBudget(t *testing.T) {
+	var input strings.Builder
+	input.WriteByte('[')
+	for track := 0; track < 2; track++ {
+		for i := range MaxTimelineRawEvents + 1 {
+			if input.Len() > 1 {
+				input.WriteByte(',')
+			}
+			fmt.Fprintf(&input, `{"ph":"X","name":"event","ts":%d,"dur":2,"pid":%d,"tid":1}`, i, track+1)
+		}
+	}
+	input.WriteByte(']')
+	model, err := Parse(strings.NewReader(input.String()), 19)
+	if err != nil {
+		t.Fatal(err)
+	}
+	window := model.NewEventQuery(nil, "").TimelineWindow(0, 0, MaxTimelineRawEvents+2, 256, 19, 20)
+	if window.Mode != TimelineAggregate || window.TotalEventCount != 2*(MaxTimelineRawEvents+1) || len(window.Rows) != MaxTimelineRows {
+		t.Fatalf("all-track aggregate exceeded or underused its shared budget: mode=%d events=%d rows=%d", window.Mode, window.TotalEventCount, len(window.Rows))
+	}
+	counts := map[uint64]uint64{}
+	for _, row := range window.Rows {
+		counts[row.TrackID] += row.EventCount
+	}
+	if len(counts) != 2 {
+		t.Fatalf("all-track aggregate counts do not preserve both tracks: %+v", counts)
+	}
+	for trackID, count := range counts {
+		if trackID == 0 || count != MaxTimelineRawEvents+1 {
+			t.Fatalf("all-track aggregate count for track %d is %d", trackID, count)
+		}
+	}
+	resource, err := EncodeTimelineWindow(window)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := DecodeTimelineResource(resource)
+	if err != nil || decoded.TrackID != 0 || len(decoded.Rows) != MaxTimelineRows {
+		t.Fatalf("all-track resource failed validation: track=%d rows=%d err=%v", decoded.TrackID, len(decoded.Rows), err)
+	}
+}
+
+func TestTimelineResourceRoundTripAndValidation(t *testing.T) {
+	window := TimelineWindow{
+		TraceGeneration: 5,
+		QueryGeneration: 6,
+		TrackID:         4,
+		Mode:            TimelineRaw,
+		StartUS:         10,
+		EndUS:           20,
+		TotalEventCount: 1,
+		Rows:            []TimelineRow{{EventID: 0, TrackID: 4, TimestampUS: 12.5, DurationUS: 2, Kind: EventComplete}},
+	}
+	data, err := EncodeTimelineWindow(window)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := DecodeTimelineResource(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.TraceGeneration != 5 || decoded.QueryGeneration != 6 || decoded.Mode != TimelineRaw || len(decoded.Rows) != 1 || decoded.Rows[0] != window.Rows[0] {
+		t.Fatalf("timeline round trip differs: %+v", decoded)
+	}
+	window.Mode = TimelineAggregate
+	window.TotalEventCount = 1000
+	window.Rows = []TimelineRow{{TrackID: 4, BucketStartUS: 10, BucketEndUS: 20, EventCount: 1000, DurationSumUS: 2}}
+	data, err = EncodeTimelineWindow(window)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err = DecodeTimelineResource(data)
+	if err != nil || decoded.Mode != TimelineAggregate || decoded.TotalEventCount != 1000 || decoded.Rows[0].EventCount != 1000 {
+		t.Fatalf("aggregate timeline round trip failed: %+v, %v", decoded, err)
+	}
+	for i := 64; i < 72; i++ {
+		data[i] = 0
+	}
+	if _, err := DecodeTimelineResource(data); err == nil {
+		t.Fatal("decoder accepted a missing track identity")
 	}
 }
 
@@ -396,6 +577,25 @@ func TestHundredThousandEventStreamingAndBoundedWindows(t *testing.T) {
 	if len(resource) > MaxResourceBytes {
 		t.Fatalf("bounded event window encoded to %d bytes", len(resource))
 	}
+	trackID := model.tracks[0].ID
+	traceStart, traceEnd, ok := model.TraceBounds()
+	if !ok {
+		t.Fatal("100k trace is missing its time bounds")
+	}
+	timeline := query.TimelineWindow(0, traceStart, traceEnd, 256, 8, 2)
+	if timeline.Mode != TimelineAggregate || timeline.TotalEventCount != count || len(timeline.Rows) > MaxTimelineRows {
+		t.Fatalf("100k timeline exceeded its bounded aggregate: mode=%d events=%d rows=%d", timeline.Mode, timeline.TotalEventCount, len(timeline.Rows))
+	}
+	if timeline.Rows[0].TrackID != trackID {
+		t.Fatal("100k timeline lost its stable track identity")
+	}
+	timelineResource, err := EncodeTimelineWindow(timeline)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(timelineResource) > MaxResourceBytes {
+		t.Fatalf("bounded timeline encoded to %d bytes", len(timelineResource))
+	}
 }
 
 type generatedTraceReader struct {
@@ -493,6 +693,23 @@ func TestMillionEventStreamingStress(t *testing.T) {
 			}
 			if len(resource) > MaxResourceBytes {
 				t.Fatalf("event resource has %d bytes", len(resource))
+			}
+			traceStart, traceEnd, ok := model.TraceBounds()
+			if !ok {
+				t.Fatal("million-event trace is missing its time bounds")
+			}
+			timelineStarted := time.Now()
+			timeline := query.TimelineWindow(0, traceStart, traceEnd, 256, 77, 6)
+			t.Logf("full-range timeline extraction: %s", time.Since(timelineStarted))
+			if timeline.Mode != TimelineAggregate || timeline.TotalEventCount != 1_000_000 || len(timeline.Rows) != 256 {
+				t.Fatalf("million-event timeline was not bounded: mode=%d total=%d rows=%d", timeline.Mode, timeline.TotalEventCount, len(timeline.Rows))
+			}
+			timelineResource, err := EncodeTimelineWindow(timeline)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(timelineResource) > MaxResourceBytes {
+				t.Fatalf("million-event timeline resource has %d bytes", len(timelineResource))
 			}
 		})
 	}

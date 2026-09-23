@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"io"
+	"math"
 	"os"
 	"sort"
 	"strings"
@@ -25,8 +26,8 @@ import (
 )
 
 const (
-	serviceStateSchema    = uint32(1)
-	serviceCommandSchema  = uint32(1)
+	serviceStateSchema    = uint32(2)
+	serviceCommandSchema  = uint32(2)
 	serviceMaxBytes       = 1 << 20
 	serviceMaxRows        = trace.MaxWindowRows
 	serviceMaxArguments   = 256
@@ -48,19 +49,22 @@ const (
 )
 
 type serviceCommand struct {
-	Schema          uint32 `json:"schema"`
-	Sequence        uint64 `json:"sequence"`
-	ControlEpoch    uint64 `json:"control_epoch"`
-	Kind            string `json:"kind"`
-	Path            string `json:"path,omitempty"`
-	Filter          string `json:"filter,omitempty"`
-	TrackID         uint64 `json:"track_id,omitempty"`
-	Enabled         bool   `json:"enabled,omitempty"`
-	TraceGeneration uint64 `json:"trace_generation,omitempty"`
-	QueryGeneration uint64 `json:"query_generation,omitempty"`
-	EventID         uint64 `json:"event_id,omitempty"`
-	FirstRow        uint64 `json:"first_row,omitempty"`
-	Count           uint32 `json:"count,omitempty"`
+	Schema          uint32  `json:"schema"`
+	Sequence        uint64  `json:"sequence"`
+	ControlEpoch    uint64  `json:"control_epoch"`
+	Kind            string  `json:"kind"`
+	Path            string  `json:"path,omitempty"`
+	Filter          string  `json:"filter,omitempty"`
+	TrackID         uint64  `json:"track_id,omitempty"`
+	Enabled         bool    `json:"enabled,omitempty"`
+	TraceGeneration uint64  `json:"trace_generation,omitempty"`
+	QueryGeneration uint64  `json:"query_generation,omitempty"`
+	EventID         uint64  `json:"event_id,omitempty"`
+	FirstRow        uint64  `json:"first_row,omitempty"`
+	Count           uint32  `json:"count,omitempty"`
+	StartUS         float64 `json:"start_us,omitempty"`
+	EndUS           float64 `json:"end_us,omitempty"`
+	ResolutionHint  uint32  `json:"resolution_hint,omitempty"`
 }
 
 type inspectorArgument struct {
@@ -72,6 +76,8 @@ type inspectorArgument struct {
 type selectedEventState struct {
 	Available              bool                `json:"available"`
 	ID                     uint64              `json:"id"`
+	HasQueryRow            bool                `json:"has_query_row"`
+	QueryRow               uint64              `json:"query_row"`
 	Name                   string              `json:"name"`
 	Category               string              `json:"category"`
 	TimestampUS            float64             `json:"timestamp_us"`
@@ -100,8 +106,11 @@ type serviceState struct {
 	MatchingEvents    uint64              `json:"matching_events"`
 	VisibleEvents     uint64              `json:"visible_events"`
 	UnsupportedPhases uint64              `json:"unsupported_phases"`
+	TraceStartUS      float64             `json:"trace_start_us"`
+	TraceEndUS        float64             `json:"trace_end_us"`
 	TracksResource    resourceHandleState `json:"tracks_resource"`
 	WindowResource    resourceHandleState `json:"window_resource"`
+	TimelineResource  resourceHandleState `json:"timeline_resource"`
 	TracksFirstRow    uint64              `json:"tracks_first_row"`
 	WindowFirstRow    uint64              `json:"window_first_row"`
 	SelectedEvent     selectedEventState  `json:"selected_event"`
@@ -126,6 +135,7 @@ type backendService struct {
 	latestFilter      atomic.Uint64
 	latestTrackWindow atomic.Uint64
 	latestWindow      atomic.Uint64
+	latestTimeline    atomic.Uint64
 	controlEpoch      atomic.Uint64
 
 	model            *trace.Model
@@ -137,6 +147,7 @@ type backendService struct {
 	state            serviceState
 	tracksResource   resourceRef
 	windowResource   resourceRef
+	timelineResource resourceRef
 	retiredResources []resourceRef
 }
 
@@ -256,6 +267,16 @@ func backendDispatchTrackWindow(traceGen, queryGen, first uint64, count uint32) 
 	})
 }
 
+func backendDispatchTimeline(traceGen, queryGen, trackID uint64, startUS, endUS float64, resolution uint32) int32 {
+	if math.IsNaN(startUS) || math.IsInf(startUS, 0) || math.IsNaN(endUS) || math.IsInf(endUS, 0) || endUS <= startUS || resolution == 0 || resolution > trace.MaxTimelineRows {
+		return statusInvalidArgument
+	}
+	return dispatchServiceCommand(serviceCommand{
+		Kind: "timeline_window", TraceGeneration: traceGen, QueryGeneration: queryGen,
+		TrackID: trackID, StartUS: startUS, EndUS: endUS, ResolutionHint: resolution,
+	})
+}
+
 func dispatchServiceCommand(command serviceCommand) int32 {
 	serviceMu.Lock()
 	s := service
@@ -305,6 +326,8 @@ func dispatchServiceCommand(command serviceCommand) int32 {
 			s.latestWindow.Store(command.Sequence)
 		case "track_window":
 			s.latestTrackWindow.Store(command.Sequence)
+		case "timeline_window":
+			s.latestTimeline.Store(command.Sequence)
 		}
 		select {
 		case s.wake <- struct{}{}:
@@ -346,6 +369,7 @@ func (s *backendService) isStopping() bool {
 func (s *backendService) drainCommands(buffer []byte) bool {
 	var latestWindow *serviceCommand
 	var latestTrackWindow *serviceCommand
+	var latestTimeline *serviceCommand
 	for !s.isStopping() {
 		var length C.size_t
 		serviceMu.Lock()
@@ -386,6 +410,8 @@ func (s *backendService) drainCommands(buffer []byte) bool {
 			latestWindow = coalesceWindowCommand(latestWindow, command)
 		case "track_window":
 			latestTrackWindow = coalesceWindowCommand(latestTrackWindow, command)
+		case "timeline_window":
+			latestTimeline = coalesceWindowCommand(latestTimeline, command)
 		}
 	}
 	if latestTrackWindow != nil && !s.isStopping() {
@@ -393,6 +419,9 @@ func (s *backendService) drainCommands(buffer []byte) bool {
 	}
 	if latestWindow != nil && !s.isStopping() {
 		s.processWindow(*latestWindow)
+	}
+	if latestTimeline != nil && !s.isStopping() {
+		s.processTimelineWindow(*latestTimeline)
 	}
 	return !s.isStopping()
 }
@@ -444,8 +473,10 @@ func (s *backendService) processOpen(command serviceCommand) {
 	candidateState.MatchingEvents = query.Count()
 	candidateState.VisibleEvents = uint64(len(page.Rows))
 	candidateState.UnsupportedPhases = model.UnsupportedPhaseCount()
+	candidateState.TraceStartUS, candidateState.TraceEndUS, _ = model.TraceBounds()
 	candidateState.TracksResource = resourceHandleState{ID: trackRef.id, Generation: trackRef.generation}
 	candidateState.WindowResource = resourceHandleState{ID: windowRef.id, Generation: windowRef.generation}
+	candidateState.TimelineResource = resourceHandleState{}
 	candidateState.TracksFirstRow = 0
 	candidateState.WindowFirstRow = page.FirstRow
 	candidateState.SelectedEvent = emptySelectedEvent()
@@ -619,6 +650,7 @@ func (s *backendService) rebuildQuery(controlEpoch uint64) {
 	candidate.UnsupportedPhases = s.model.UnsupportedPhaseCount()
 	candidate.TracksResource = resourceHandleState{ID: trackRef.id, Generation: trackRef.generation}
 	candidate.WindowResource = resourceHandleState{ID: windowRef.id, Generation: windowRef.generation}
+	candidate.TimelineResource = resourceHandleState{}
 	candidate.TracksFirstRow = 0
 	candidate.WindowFirstRow = page.FirstRow
 
@@ -652,9 +684,12 @@ func (s *backendService) processSelection(command serviceCommand) {
 		candidate.SelectedEvent = emptySelectedEvent()
 	} else {
 		arguments, wasTruncated := inspectorArguments(details.ArgsJSON)
+		queryRow, hasQueryRow := s.query.RowForEventID(details.Event.ID)
 		candidate.SelectedEvent = selectedEventState{
 			Available:              true,
 			ID:                     details.Event.ID,
+			HasQueryRow:            hasQueryRow,
+			QueryRow:               queryRow,
 			Name:                   boundedStateText(details.Event.Name),
 			Category:               boundedStateText(details.Event.Category),
 			TimestampUS:            details.Event.TimestampUS,
@@ -711,6 +746,39 @@ func (s *backendService) processWindow(command serviceCommand) {
 	serviceMu.Unlock()
 }
 
+func (s *backendService) processTimelineWindow(command serviceCommand) {
+	if s.model == nil || s.query == nil || s.isStopping() ||
+		!timelineRequestIsCurrent(command, s.traceGeneration, s.queryGeneration, s.latestTimeline.Load(), s.controlEpoch.Load()) {
+		return
+	}
+	window := s.query.TimelineWindow(command.TrackID, command.StartUS, command.EndUS, command.ResolutionHint, s.traceGeneration, s.queryGeneration)
+	data, err := trace.EncodeTimelineWindow(window)
+	if err != nil || len(data) > serviceMaxBytes {
+		return
+	}
+	s.releaseRetiredResources()
+	timelineRef, status := publishServiceResource(data)
+	if status != int32(C.CALIBER_OK) {
+		return
+	}
+	candidate := s.state
+	candidate.TimelineResource = resourceHandleState{ID: timelineRef.id, Generation: timelineRef.generation}
+	serviceMu.Lock()
+	if s.stopped || !timelineRequestIsCurrent(command, s.traceGeneration, s.queryGeneration, s.latestTimeline.Load(), s.controlEpoch.Load()) {
+		serviceMu.Unlock()
+		s.releaseResource(timelineRef)
+		return
+	}
+	if publishServiceState(candidate) != int32(C.CALIBER_OK) {
+		serviceMu.Unlock()
+		s.releaseResource(timelineRef)
+		return
+	}
+	s.state = candidate
+	s.commitTimelineResource(timelineRef)
+	serviceMu.Unlock()
+}
+
 func (s *backendService) processTrackWindow(command serviceCommand) {
 	if s.model == nil || s.isStopping() ||
 		!windowRequestIsCurrent(command, s.traceGeneration, s.queryGeneration, s.latestTrackWindow.Load(), s.controlEpoch.Load()) {
@@ -760,6 +828,15 @@ func windowRequestIsCurrent(command serviceCommand, traceGeneration, queryGenera
 		command.QueryGeneration == queryGeneration &&
 		command.Sequence == latestSequence &&
 		command.ControlEpoch == controlEpoch
+}
+
+func timelineRequestIsCurrent(command serviceCommand, traceGeneration, queryGeneration, latestSequence, controlEpoch uint64) bool {
+	return command.Kind == "timeline_window" && command.TraceGeneration == traceGeneration &&
+		command.QueryGeneration == queryGeneration && command.Sequence == latestSequence &&
+		command.ControlEpoch == controlEpoch &&
+		!math.IsNaN(command.StartUS) && !math.IsInf(command.StartUS, 0) &&
+		!math.IsNaN(command.EndUS) && !math.IsInf(command.EndUS, 0) && command.EndUS > command.StartUS &&
+		command.ResolutionHint > 0 && command.ResolutionHint <= trace.MaxTimelineRows
 }
 
 func trackCommandMatches(command serviceCommand, traceGeneration uint64) bool {
@@ -829,6 +906,15 @@ func (s *backendService) commitResourcePair(tracks, window resourceRef) {
 	s.tracksResource, s.windowResource = tracks, window
 	s.retireResource(oldTracks)
 	s.retireResource(oldWindow)
+	oldTimeline := s.timelineResource
+	s.timelineResource = resourceRef{}
+	s.retireResource(oldTimeline)
+}
+
+func (s *backendService) commitTimelineResource(timeline resourceRef) {
+	old := s.timelineResource
+	s.timelineResource = timeline
+	s.retireResource(old)
 }
 
 func (s *backendService) commitWindowResource(window resourceRef) {
@@ -844,7 +930,7 @@ func (s *backendService) commitTracksResource(tracks resourceRef) {
 }
 
 func (s *backendService) retireResource(ref resourceRef) {
-	if !ref.valid() || sameResource(ref, s.tracksResource) || sameResource(ref, s.windowResource) {
+	if !ref.valid() || sameResource(ref, s.tracksResource) || sameResource(ref, s.windowResource) || sameResource(ref, s.timelineResource) {
 		return
 	}
 	for _, prior := range s.retiredResources {
@@ -863,8 +949,8 @@ func (s *backendService) releaseRetiredResources() {
 }
 
 func (s *backendService) releaseAllResources() {
-	seen := make(map[resourceRef]struct{}, len(s.retiredResources)+2)
-	for _, ref := range append(append([]resourceRef{}, s.retiredResources...), s.tracksResource, s.windowResource) {
+	seen := make(map[resourceRef]struct{}, len(s.retiredResources)+3)
+	for _, ref := range append(append([]resourceRef{}, s.retiredResources...), s.tracksResource, s.windowResource, s.timelineResource) {
 		if !ref.valid() {
 			continue
 		}
@@ -875,7 +961,7 @@ func (s *backendService) releaseAllResources() {
 		s.releaseResource(ref)
 	}
 	s.retiredResources = nil
-	s.tracksResource, s.windowResource = resourceRef{}, resourceRef{}
+	s.tracksResource, s.windowResource, s.timelineResource = resourceRef{}, resourceRef{}, resourceRef{}
 }
 
 func (s *backendService) releaseResource(ref resourceRef) {

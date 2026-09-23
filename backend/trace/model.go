@@ -25,6 +25,22 @@ const (
 	EventInstant
 )
 
+// TimelineMode selects whether a bounded timeline resource contains semantic
+// event identities or fixed temporal summaries.
+type TimelineMode uint32
+
+const (
+	TimelineRaw TimelineMode = iota + 1
+	TimelineAggregate
+)
+
+// MaxTimelineRows bounds both raw event payloads and aggregate bucket count.
+const MaxTimelineRows = 512
+
+// MaxTimelineRawEvents stays below the Alicorn geometry vertex budget even
+// when every item is an instant rendered as a filled circle.
+const MaxTimelineRawEvents = 128
+
 // Event is the compact indexed representation used in event windows. ID is
 // the source-record ordinal; it is not a row number or timestamp. The trace
 // generation is carried separately by Model and resource headers.
@@ -36,6 +52,32 @@ type Event struct {
 	Kind        EventKind
 	Name        string
 	Category    string
+}
+
+// TimelineRow is either a raw event (TimelineRaw) or a temporal bucket
+// (TimelineAggregate). Fields not used by the selected mode remain zero.
+type TimelineRow struct {
+	EventID       uint64
+	TrackID       uint64
+	TimestampUS   float64
+	DurationUS    float64
+	Kind          EventKind
+	BucketStartUS float64
+	BucketEndUS   float64
+	EventCount    uint64
+	DurationSumUS float64
+}
+
+// TimelineWindow is an immutable, bounded projection of a time range.
+type TimelineWindow struct {
+	TraceGeneration uint64
+	QueryGeneration uint64
+	TrackID         uint64
+	Mode            TimelineMode
+	StartUS         float64
+	EndUS           float64
+	TotalEventCount uint64
+	Rows            []TimelineRow
 }
 
 // EventDetails is returned only for an explicit stable-ID lookup. Arguments
@@ -101,6 +143,10 @@ type Model struct {
 	tracks                []Track
 	trackByKey            map[trackKey]int
 	eventIndexByOrdinal   map[uint64]int
+	trackEventIndices     map[uint64]*trackEventIndex
+	traceStartUS          float64
+	traceEndUS            float64
+	hasTraceBounds        bool
 	unsupportedPhaseCount uint64
 	inputRecordCount      uint64
 }
@@ -164,6 +210,8 @@ type EventPage struct {
 type EventQuery struct {
 	model   *Model
 	indices []int
+	enabled map[uint64]struct{}
+	filter  string
 }
 
 // NewEventQuery builds a timestamp-ordered query over enabled tracks and an
@@ -191,11 +239,276 @@ func (m *Model) NewEventQuery(enabledTrackIDs []uint64, textFilter string) *Even
 		}
 		indices = append(indices, i)
 	}
-	return &EventQuery{model: m, indices: indices}
+	return &EventQuery{model: m, indices: indices, enabled: enabled, filter: filter}
+}
+
+// TraceBounds returns the earliest event timestamp and latest event end. An
+// instant contributes its timestamp; a complete event contributes ts+dur.
+func (m *Model) TraceBounds() (startUS, endUS float64, ok bool) {
+	if m == nil || !m.hasTraceBounds {
+		return 0, 0, false
+	}
+	return m.traceStartUS, m.traceEndUS, true
+}
+
+// TimelineWindow queries one enabled track over [startUS,endUS), or all
+// enabled tracks when trackID is zero. Intervals
+// crossing the left boundary are included. If more than MaxTimelineRawEvents
+// match, the result switches to bounded temporal buckets. Resolution is a
+// semantic bucket-count hint, clamped to [1, MaxTimelineRows].
+func (q *EventQuery) TimelineWindow(trackID uint64, startUS, endUS float64, resolution uint32, traceGeneration, queryGeneration uint64) TimelineWindow {
+	result := TimelineWindow{
+		TraceGeneration: traceGeneration,
+		QueryGeneration: queryGeneration,
+		TrackID:         trackID,
+		Mode:            TimelineRaw,
+		StartUS:         startUS,
+		EndUS:           endUS,
+		Rows:            []TimelineRow{},
+	}
+	if q == nil || q.model == nil || !finite(startUS) || !finite(endUS) || endUS <= startUS {
+		return result
+	}
+
+	if resolution == 0 {
+		resolution = 1
+	}
+	if resolution > MaxTimelineRows {
+		resolution = MaxTimelineRows
+	}
+	trackIDs := make([]uint64, 0, 1)
+	if trackID != 0 {
+		if q.enabled != nil {
+			if _, enabled := q.enabled[trackID]; !enabled {
+				return result
+			}
+		}
+		trackIDs = append(trackIDs, trackID)
+	} else {
+		for _, track := range q.model.tracks {
+			if q.enabled != nil {
+				if _, enabled := q.enabled[track.ID]; !enabled {
+					continue
+				}
+			}
+			trackIDs = append(trackIDs, track.ID)
+			if len(trackIDs) == MaxTimelineRows {
+				break
+			}
+		}
+	}
+	if len(trackIDs) == 0 {
+		return result
+	}
+	var rawRows []TimelineRow
+	var aggregateRows []TimelineRow
+	var bucketBases map[uint64]int
+	var bucketsPerTrack uint32
+	rawRows = make([]TimelineRow, 0, MaxTimelineRawEvents+1)
+	result.TotalEventCount = 0
+	for _, currentTrackID := range trackIDs {
+		index := q.model.trackEventIndices[currentTrackID]
+		if index == nil {
+			continue
+		}
+		index.visitOverlapping(q.model, startUS, endUS, func(event Event) bool {
+			if q.filter != "" && !strings.Contains(strings.ToLower(event.Name), q.filter) && !strings.Contains(strings.ToLower(event.Category), q.filter) {
+				return true
+			}
+			result.TotalEventCount++
+			raw := TimelineRow{EventID: event.ID, TrackID: event.TrackID, TimestampUS: event.TimestampUS, DurationUS: event.DurationUS, Kind: event.Kind}
+			if aggregateRows == nil {
+				rawRows = append(rawRows, raw)
+				if len(rawRows) > MaxTimelineRawEvents {
+					aggregateRows, bucketBases, bucketsPerTrack = makeTimelineBuckets(trackIDs, startUS, endUS, resolution)
+					for _, prior := range rawRows {
+						accumulateTimelineEvent(aggregateRows, bucketBases, bucketsPerTrack, prior, startUS, endUS)
+					}
+					rawRows = nil
+				}
+			} else {
+				accumulateTimelineEvent(aggregateRows, bucketBases, bucketsPerTrack, raw, startUS, endUS)
+			}
+			return true
+		})
+	}
+	if aggregateRows != nil {
+		result.Mode = TimelineAggregate
+		result.Rows = aggregateRows
+	} else {
+		result.Rows = rawRows
+	}
+	return result
+}
+
+type trackEventIndex struct {
+	eventIndices []int
+	leafBase     int
+	maxEndTree   []float64
+}
+
+func (idx *trackEventIndex) visitOverlapping(model *Model, startUS, endUS float64, visit func(Event) bool) {
+	if idx == nil || len(idx.eventIndices) == 0 {
+		return
+	}
+	end := sort.Search(len(idx.eventIndices), func(i int) bool {
+		return model.events[idx.eventIndices[i]].TimestampUS >= endUS
+	})
+	if end == 0 {
+		return
+	}
+	_ = idx.visitTreeRange(model, 1, 0, idx.leafBase, end, startUS, endUS, visit)
+}
+
+func (idx *trackEventIndex) visitTreeRange(model *Model, node, left, right, end int, startUS, endUS float64, visit func(Event) bool) bool {
+	if left >= end || idx.maxEndTree[node] < startUS {
+		return true
+	}
+	if right-left == 1 {
+		if left < len(idx.eventIndices) {
+			eventIndex := idx.eventIndices[left]
+			event := model.events[eventIndex].Event
+			if eventIntersectsRange(event, startUS, endUS) {
+				return visit(event)
+			}
+		}
+		return true
+	}
+	middle := left + (right-left)/2
+	if !idx.visitTreeRange(model, node*2, left, middle, end, startUS, endUS, visit) {
+		return false
+	}
+	return idx.visitTreeRange(model, node*2+1, middle, right, end, startUS, endUS, visit)
+}
+
+func makeTimelineBuckets(trackIDs []uint64, startUS, endUS float64, resolution uint32) ([]TimelineRow, map[uint64]int, uint32) {
+	if len(trackIDs) == 0 {
+		return nil, nil, 0
+	}
+	bucketsPerTrack := uint32(MaxTimelineRows / len(trackIDs))
+	if bucketsPerTrack == 0 {
+		bucketsPerTrack = 1
+	}
+	if bucketsPerTrack > resolution {
+		bucketsPerTrack = resolution
+	}
+	buckets := make([]TimelineRow, 0, len(trackIDs)*int(bucketsPerTrack))
+	bases := make(map[uint64]int, len(trackIDs))
+	span := endUS - startUS
+	for _, trackID := range trackIDs {
+		bases[trackID] = len(buckets)
+		for i := uint32(0); i < bucketsPerTrack; i++ {
+			buckets = append(buckets, TimelineRow{
+				TrackID:       trackID,
+				BucketStartUS: startUS + span*float64(i)/float64(bucketsPerTrack),
+				BucketEndUS:   startUS + span*float64(i+1)/float64(bucketsPerTrack),
+			})
+		}
+	}
+	return buckets, bases, bucketsPerTrack
+}
+
+func accumulateTimelineEvent(buckets []TimelineRow, bases map[uint64]int, bucketsPerTrack uint32, event TimelineRow, startUS, endUS float64) {
+	base, exists := bases[event.TrackID]
+	if !exists || bucketsPerTrack == 0 {
+		return
+	}
+	span := endUS - startUS
+	position := event.TimestampUS
+	if position < startUS {
+		position = startUS
+	}
+	if position >= endUS {
+		position = math.Nextafter(endUS, startUS)
+	}
+	bucket := int((position - startUS) / span * float64(bucketsPerTrack))
+	if bucket < 0 {
+		bucket = 0
+	} else if bucket >= int(bucketsPerTrack) {
+		bucket = int(bucketsPerTrack) - 1
+	}
+	row := &buckets[base+bucket]
+	row.EventCount++
+	if event.Kind == EventComplete && event.DurationUS > 0 {
+		overlapStart := math.Max(event.TimestampUS, startUS)
+		overlapEnd := math.Min(event.TimestampUS+event.DurationUS, endUS)
+		if overlapEnd > overlapStart {
+			row.DurationSumUS += overlapEnd - overlapStart
+		}
+	}
+}
+
+func eventIntersectsRange(event Event, startUS, endUS float64) bool {
+	if event.TimestampUS >= endUS {
+		return false
+	}
+	if event.Kind == EventInstant || event.DurationUS <= 0 {
+		return event.TimestampUS >= startUS
+	}
+	return eventEndUS(event) > startUS
+}
+
+func eventEndUS(event Event) float64 {
+	if event.Kind != EventComplete || event.DurationUS <= 0 {
+		return event.TimestampUS
+	}
+	end := event.TimestampUS + event.DurationUS
+	if math.IsInf(end, 1) {
+		return math.MaxFloat64
+	}
+	return end
+}
+
+func buildTrackEventIndex(events []eventRecord) map[uint64]*trackEventIndex {
+	indices := make(map[uint64]*trackEventIndex)
+	for i := range events {
+		trackID := events[i].TrackID
+		index := indices[trackID]
+		if index == nil {
+			index = &trackEventIndex{}
+			indices[trackID] = index
+		}
+		index.eventIndices = append(index.eventIndices, i)
+	}
+	for _, index := range indices {
+		index.leafBase = 1
+		for index.leafBase < len(index.eventIndices) {
+			index.leafBase *= 2
+		}
+		index.maxEndTree = make([]float64, index.leafBase*2)
+		for i := range index.maxEndTree {
+			index.maxEndTree[i] = -math.MaxFloat64
+		}
+		for i, eventIndex := range index.eventIndices {
+			index.maxEndTree[index.leafBase+i] = eventEndUS(events[eventIndex].Event)
+		}
+		for i := index.leafBase - 1; i > 0; i-- {
+			index.maxEndTree[i] = math.Max(index.maxEndTree[i*2], index.maxEndTree[i*2+1])
+		}
+	}
+	return indices
 }
 
 // Count returns the exact number of matches in this immutable query.
 func (q *EventQuery) Count() uint64 { return uint64(len(q.indices)) }
+
+// RowForEventID finds the current query position for a stable source ordinal.
+// It is intended for the comparatively rare selection reconciliation path,
+// not for frame-time row lookup.
+func (q *EventQuery) RowForEventID(ordinal uint64) (uint64, bool) {
+	if q == nil || q.model == nil {
+		return 0, false
+	}
+	eventIndex, exists := q.model.eventIndexByOrdinal[ordinal]
+	if !exists {
+		return 0, false
+	}
+	row := sort.Search(len(q.indices), func(i int) bool { return q.indices[i] >= eventIndex })
+	if row == len(q.indices) || q.indices[row] != eventIndex {
+		return 0, false
+	}
+	return uint64(row), true
+}
 
 // Window returns at most MaxWindowRows rows. Argument payloads are omitted
 // from windows; use LookupEvent for the bounded inspector detail.

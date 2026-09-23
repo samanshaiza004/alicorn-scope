@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"strings"
 	"testing"
@@ -179,6 +180,34 @@ func TestTrackWindowFreshnessRejectsStaleQuery(t *testing.T) {
 	}
 	if windowRequestIsCurrent(request, 4, 10, 21, 6) {
 		t.Fatal("track page from an earlier query was accepted")
+	}
+}
+
+func TestTimelineWindowFreshnessIsIndependentAndBounded(t *testing.T) {
+	request := serviceCommand{
+		Kind: "timeline_window", Sequence: 11, ControlEpoch: 4,
+		TraceGeneration: 8, QueryGeneration: 9, TrackID: 17,
+		StartUS: 10, EndUS: 20, ResolutionHint: 256,
+	}
+	if !timelineRequestIsCurrent(request, 8, 9, 11, 4) {
+		t.Fatal("current timeline request was rejected")
+	}
+	if timelineRequestIsCurrent(request, 8, 9, 12, 4) || timelineRequestIsCurrent(request, 8, 10, 11, 4) || timelineRequestIsCurrent(request, 8, 9, 11, 5) {
+		t.Fatal("stale timeline sequence, query generation, or control epoch was accepted")
+	}
+	request.StartUS = math.NaN()
+	if timelineRequestIsCurrent(request, 8, 9, 11, 4) {
+		t.Fatal("non-finite timeline range was accepted")
+	}
+}
+
+func TestTimelineCommandCoalescingKeepsNewestOnlyInItsLane(t *testing.T) {
+	var history, timeline *serviceCommand
+	history = coalesceWindowCommand(history, serviceCommand{Kind: "window", Sequence: 7})
+	timeline = coalesceWindowCommand(timeline, serviceCommand{Kind: "timeline_window", Sequence: 8})
+	history = coalesceWindowCommand(history, serviceCommand{Kind: "window", Sequence: 9})
+	if history == nil || timeline == nil || history.Sequence != 9 || timeline.Sequence != 8 {
+		t.Fatalf("independent lanes coalesced incorrectly: history=%+v timeline=%+v", history, timeline)
 	}
 }
 

@@ -11,14 +11,17 @@ import (
 // Binary resource format constants. All integers and float bit patterns are
 // little-endian. String offsets are relative to the UTF-8 string table.
 const (
-	EventResourceMagic   = "SCEV"
-	TrackResourceMagic   = "SCTR"
-	EventResourceVersion = uint16(1)
-	TrackResourceVersion = uint16(1)
-	ResourceHeaderSize   = uint16(64)
-	EventResourceRowSize = uint32(56)
-	TrackResourceRowSize = uint32(64)
-	MaxResourceBytes     = 1 << 20
+	EventResourceMagic      = "SCEV"
+	TrackResourceMagic      = "SCTR"
+	TimelineResourceMagic   = "SCTW"
+	EventResourceVersion    = uint16(1)
+	TrackResourceVersion    = uint16(1)
+	TimelineResourceVersion = uint16(1)
+	ResourceHeaderSize      = uint16(64)
+	EventResourceRowSize    = uint32(56)
+	TrackResourceRowSize    = uint32(64)
+	TimelineResourceRowSize = uint32(40)
+	MaxResourceBytes        = 1 << 20
 )
 
 // Event row flags. Exactly one kind bit must be set. TextTruncated indicates
@@ -85,6 +88,19 @@ type TrackResourceRow struct {
 type TrackResource struct {
 	Header ResourceHeader
 	Rows   []TrackResourceRow
+}
+
+// TimelineResource is the validated decoded form of an SCTW v1 payload.
+type TimelineResource struct {
+	TraceGeneration uint64
+	QueryGeneration uint64
+	TrackID         uint64
+	Mode            TimelineMode
+	RowCount        uint32
+	TotalEventCount uint64
+	StartUS         float64
+	EndUS           float64
+	Rows            []TimelineRow
 }
 
 // EncodeTrackCatalog produces a SCTR v1 page from the complete track catalog.
@@ -174,6 +190,131 @@ func EncodeEventWindow(query *EventQuery, page EventPage, traceGeneration, query
 		}
 	}
 	return encodeEventPage(traceGeneration, queryGeneration, page)
+}
+
+// EncodeTimelineWindow produces a fixed-width, versioned SCTW v1 resource.
+// The payload is intentionally string-free; event labels/details remain in
+// the existing bounded event and selected-detail paths.
+func EncodeTimelineWindow(window TimelineWindow) ([]byte, error) {
+	if !finite(window.StartUS) || !finite(window.EndUS) || window.EndUS <= window.StartUS {
+		return nil, errors.New("timeline resource has an invalid time range")
+	}
+	if len(window.Rows) > MaxTimelineRows {
+		return nil, errors.New("timeline resource exceeds the row limit")
+	}
+	if window.Mode != TimelineRaw && window.Mode != TimelineAggregate {
+		return nil, fmt.Errorf("timeline resource has unsupported mode %d", window.Mode)
+	}
+	if window.Mode == TimelineRaw && len(window.Rows) > MaxTimelineRawEvents {
+		return nil, errors.New("raw timeline resource exceeds the geometry-safe event limit")
+	}
+	for i, row := range window.Rows {
+		if row.TrackID == 0 || (window.TrackID != 0 && row.TrackID != window.TrackID) {
+			return nil, fmt.Errorf("timeline row %d has no track identity", i)
+		}
+		if window.Mode == TimelineRaw {
+			if !finite(row.TimestampUS) || !finite(row.DurationUS) || row.DurationUS < 0 || (row.Kind != EventComplete && row.Kind != EventInstant) {
+				return nil, fmt.Errorf("timeline raw row %d is invalid", i)
+			}
+		} else if !finite(row.BucketStartUS) || !finite(row.BucketEndUS) || row.BucketEndUS <= row.BucketStartUS || !finite(row.DurationSumUS) || row.DurationSumUS < 0 {
+			return nil, fmt.Errorf("timeline aggregate row %d is invalid", i)
+		}
+	}
+
+	rowsOffset := int(ResourceHeaderSize)
+	out := make([]byte, rowsOffset+len(window.Rows)*int(TimelineResourceRowSize))
+	copy(out[:4], TimelineResourceMagic)
+	binary.LittleEndian.PutUint16(out[4:6], TimelineResourceVersion)
+	binary.LittleEndian.PutUint16(out[6:8], ResourceHeaderSize)
+	binary.LittleEndian.PutUint64(out[8:16], window.TraceGeneration)
+	binary.LittleEndian.PutUint64(out[16:24], window.QueryGeneration)
+	binary.LittleEndian.PutUint32(out[24:28], uint32(window.Mode))
+	binary.LittleEndian.PutUint32(out[28:32], uint32(len(window.Rows)))
+	binary.LittleEndian.PutUint64(out[32:40], window.TotalEventCount)
+	binary.LittleEndian.PutUint64(out[40:48], math.Float64bits(window.StartUS))
+	binary.LittleEndian.PutUint64(out[48:56], math.Float64bits(window.EndUS))
+	binary.LittleEndian.PutUint64(out[56:64], window.TrackID)
+	for i, row := range window.Rows {
+		base := rowsOffset + i*int(TimelineResourceRowSize)
+		if window.Mode == TimelineRaw {
+			binary.LittleEndian.PutUint64(out[base:base+8], row.EventID)
+			binary.LittleEndian.PutUint64(out[base+8:base+16], row.TrackID)
+			binary.LittleEndian.PutUint64(out[base+16:base+24], math.Float64bits(row.TimestampUS))
+			binary.LittleEndian.PutUint64(out[base+24:base+32], math.Float64bits(row.DurationUS))
+			binary.LittleEndian.PutUint32(out[base+32:base+36], uint32(row.Kind))
+			// bytes 36..40 are reserved and remain zero.
+		} else {
+			binary.LittleEndian.PutUint64(out[base:base+8], row.TrackID)
+			binary.LittleEndian.PutUint64(out[base+8:base+16], math.Float64bits(row.BucketStartUS))
+			binary.LittleEndian.PutUint64(out[base+16:base+24], math.Float64bits(row.BucketEndUS))
+			binary.LittleEndian.PutUint64(out[base+24:base+32], row.EventCount)
+			binary.LittleEndian.PutUint64(out[base+32:base+40], math.Float64bits(row.DurationSumUS))
+		}
+	}
+	if len(out) > MaxResourceBytes {
+		return nil, errors.New("timeline resource exceeds 1 MiB")
+	}
+	return out, nil
+}
+
+// DecodeTimelineResource validates an SCTW v1 payload without retaining any
+// borrowed Caliber memory.
+func DecodeTimelineResource(data []byte) (TimelineResource, error) {
+	if len(data) < int(ResourceHeaderSize) || len(data) > MaxResourceBytes {
+		return TimelineResource{}, errors.New("timeline resource has an invalid byte length")
+	}
+	if string(data[:4]) != TimelineResourceMagic || binary.LittleEndian.Uint16(data[4:6]) != TimelineResourceVersion || binary.LittleEndian.Uint16(data[6:8]) != ResourceHeaderSize {
+		return TimelineResource{}, errors.New("timeline resource has an unsupported header")
+	}
+	mode := TimelineMode(binary.LittleEndian.Uint32(data[24:28]))
+	rowCount := binary.LittleEndian.Uint32(data[28:32])
+	total := binary.LittleEndian.Uint64(data[32:40])
+	startUS := math.Float64frombits(binary.LittleEndian.Uint64(data[40:48]))
+	endUS := math.Float64frombits(binary.LittleEndian.Uint64(data[48:56]))
+	trackID := binary.LittleEndian.Uint64(data[56:64])
+	rowsOffset := uint64(ResourceHeaderSize)
+	rowSize := uint64(TimelineResourceRowSize)
+	if (mode != TimelineRaw && mode != TimelineAggregate) || rowCount > MaxTimelineRows || (mode == TimelineRaw && rowCount > MaxTimelineRawEvents) || rowsOffset+uint64(rowCount)*rowSize != uint64(len(data)) || !finite(startUS) || !finite(endUS) || endUS <= startUS {
+		return TimelineResource{}, errors.New("timeline resource header fields are invalid")
+	}
+	if mode == TimelineRaw && total != uint64(rowCount) {
+		return TimelineResource{}, errors.New("raw timeline count does not match its row count")
+	}
+	resource := TimelineResource{
+		TraceGeneration: binary.LittleEndian.Uint64(data[8:16]),
+		QueryGeneration: binary.LittleEndian.Uint64(data[16:24]),
+		TrackID:         trackID,
+		Mode:            mode,
+		RowCount:        rowCount,
+		TotalEventCount: total,
+		StartUS:         startUS,
+		EndUS:           endUS,
+		Rows:            make([]TimelineRow, rowCount),
+	}
+	for i := uint32(0); i < rowCount; i++ {
+		base := int(rowsOffset) + int(i)*int(rowSize)
+		row := data[base : base+int(rowSize)]
+		if mode == TimelineRaw {
+			kind := EventKind(binary.LittleEndian.Uint32(row[32:36]))
+			timestamp := math.Float64frombits(binary.LittleEndian.Uint64(row[16:24]))
+			duration := math.Float64frombits(binary.LittleEndian.Uint64(row[24:32]))
+			rowTrackID := binary.LittleEndian.Uint64(row[8:16])
+			if (kind != EventComplete && kind != EventInstant) || !finite(timestamp) || !finite(duration) || duration < 0 || rowTrackID == 0 || (trackID != 0 && rowTrackID != trackID) || binary.LittleEndian.Uint32(row[36:40]) != 0 {
+				return TimelineResource{}, fmt.Errorf("timeline raw row %d is invalid", i)
+			}
+			resource.Rows[i] = TimelineRow{EventID: binary.LittleEndian.Uint64(row[0:8]), TrackID: binary.LittleEndian.Uint64(row[8:16]), TimestampUS: timestamp, DurationUS: duration, Kind: kind}
+		} else {
+			trackID := binary.LittleEndian.Uint64(row[0:8])
+			bucketStart := math.Float64frombits(binary.LittleEndian.Uint64(row[8:16]))
+			bucketEnd := math.Float64frombits(binary.LittleEndian.Uint64(row[16:24]))
+			durationSum := math.Float64frombits(binary.LittleEndian.Uint64(row[32:40]))
+			if trackID == 0 || (resource.TrackID != 0 && trackID != resource.TrackID) || !finite(bucketStart) || !finite(bucketEnd) || bucketEnd <= bucketStart || !finite(durationSum) || durationSum < 0 {
+				return TimelineResource{}, fmt.Errorf("timeline aggregate row %d is invalid", i)
+			}
+			resource.Rows[i] = TimelineRow{TrackID: trackID, BucketStartUS: bucketStart, BucketEndUS: bucketEnd, EventCount: binary.LittleEndian.Uint64(row[24:32]), DurationSumUS: durationSum}
+		}
+	}
+	return resource, nil
 }
 
 func encodeEventPage(traceGeneration, queryGeneration uint64, page EventPage) ([]byte, error) {

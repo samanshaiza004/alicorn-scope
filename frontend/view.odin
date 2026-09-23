@@ -45,6 +45,8 @@ Scope_Argument :: struct {
 Scope_Event_Detail :: struct {
 	available: bool,
 	id: u64,
+	has_query_row: bool,
+	query_row: int,
 	timestamp_us: f64,
 	duration_us: f64,
 	category: string,
@@ -76,6 +78,20 @@ Scope_Interaction_Result :: struct {
 	enabled: bool,
 }
 
+Scope_Timeline_Mode :: enum { None, Raw, Aggregate }
+
+Scope_Timeline_Row :: struct {
+	event_id: u64,
+	track_id: u64,
+	timestamp_us: f64,
+	duration_us: f64,
+	kind: u32,
+	bucket_start_us: f64,
+	bucket_end_us: f64,
+	event_count: u64,
+	duration_sum_us: f64,
+}
+
 Scope_UI_State :: struct {
 	has_selected_track: bool,
 	selected_track_id: u64,
@@ -94,6 +110,7 @@ Scope_UI_State :: struct {
 	tracks_scroll_node: alicorn.Node_ID,
 	events_scroll_node: alicorn.Node_ID,
 	arguments_scroll_node: alicorn.Node_ID,
+	timeline_surface_node: alicorn.Node_ID,
 	filter_owned: bool,
 }
 
@@ -114,10 +131,45 @@ Scope_View :: struct {
 	event_first_row: int,
 	event_total_count: int,
 	selected_event: Scope_Event_Detail,
+	trace_start_us, trace_end_us: f64,
+	timeline_start_us, timeline_end_us: f64,
+	timeline_cache_start_us, timeline_cache_end_us: f64,
+	timeline_cache_track_id: u64,
+	timeline_cache_trace_generation: u64,
+	timeline_cache_query_generation: u64,
+	timeline_rows: []Scope_Timeline_Row,
+	timeline_mode: Scope_Timeline_Mode,
+	timeline_total_events: u64,
+	timeline_ready: bool,
+	timeline_revision: u64,
+	timeline_geometry_revision: u64,
+	timeline_geometry_width, timeline_geometry_height: f32,
+	timeline_drag_active: bool,
+	timeline_drag_moved: bool,
+	timeline_drag_start_x: f32,
+	timeline_drag_start_time: f64,
+	timeline_drag_start_end: f64,
+	timeline_request_pending: bool,
+	timeline_request_track_id: u64,
+	timeline_request_start_us, timeline_request_end_us: f64,
 
 	filter: string,
 	interaction: Scope_Interaction_Result,
 	ui: Scope_UI_State,
+}
+
+scope_timeline_track_y :: proc(view: Scope_View, track_id: u64, height: f32) -> (y: f32, found: bool) {
+	track_count := max(len(view.tracks), 1)
+	row_height := height/f32(track_count)
+	for track, local_index in view.tracks {
+		if track.id == track_id {
+			return min((f32(local_index)+0.5)*row_height, max(height-1, 0)), true
+		}
+	}
+	if track_id != 0 && view.timeline_cache_track_id == track_id {
+		return height*0.5, true
+	}
+	return 0, false
 }
 
 Scope_Navigation_Key :: enum {
@@ -514,8 +566,8 @@ scope_render :: proc(view: ^Scope_View, rt: ^alicorn.Runtime) -> alicorn.Node_ID
 				view.ui.selected_event_id = 0
 				view.ui.has_selected_event_row = false
 				view.ui.has_pending_navigation_row = false
-				view.ui.has_pending_window_request = false
-				view.ui.has_pending_track_window_request = false
+				view.timeline_revision += 1
+				if view.timeline_revision == 0 { view.timeline_revision = 1 }
 			}
 			scope_publish_interaction(view, .Track_Selected, track.id, 0)
 			selection_changed = true
@@ -561,6 +613,47 @@ scope_render :: proc(view: ^Scope_View, rt: ^alicorn.Runtime) -> alicorn.Node_ID
 		style=alicorn.layout_style(grow=1, padding=8, gap=6, clip=true),
 		color=SCOPE_PANEL_BACKGROUND,
 	)
+	timeline_split := alicorn.split_begin(
+		&ui,
+		key=alicorn.key_string("scope-timeline-events-split"),
+		axis=.Vertical,
+		initial=290,
+		min_first=140,
+		min_second=150,
+		style=alicorn.layout_style(grow=1, clip=true),
+		label="scope-timeline-events",
+	)
+	alicorn.split_first_begin(&ui, timeline_split)
+	alicorn.container_begin(
+		&ui,
+		.Container,
+		label="scope-timeline-panel",
+		style=alicorn.layout_style(grow=1, gap=4, clip=true),
+	)
+	track_label := "all enabled tracks"
+	if view.track_first_row >= 512 { track_label = "selected track · large catalog" }
+	mode_label := "Loading time window..."
+	if view.timeline_ready {
+		mode_label = fmt.tprintf("%d events in range", view.timeline_total_events)
+		if view.timeline_mode == .Aggregate { mode_label = fmt.tprintf("Aggregated · %d events", view.timeline_total_events) }
+	}
+	alicorn.container_begin(&ui, .Container, label="scope-timeline-heading", style=alicorn.layout_style(.Row, height=28, gap=8, align=.Center))
+	alicorn.text(&ui, fmt.tprintf("Timeline  ·  %s", track_label), style=alicorn.layout_style(.Row, grow=1), text_style=alicorn.Text_Style{font_weight=alicorn.FONT_WEIGHT_SEMIBOLD, overflow=.Ellipsis})
+	alicorn.text(&ui, mode_label, style=alicorn.layout_style(.Row, height=24), text_style=alicorn.Text_Style{overflow=.Ellipsis})
+	alicorn.container_end(&ui)
+	if !view.ui.has_selected_track {
+		alicorn.text(&ui, "Select a track to view its events over time", style=alicorn.layout_style(.Row, height=24))
+	}
+	view.ui.timeline_surface_node = alicorn.gpu_geometry_surface(
+		&ui,
+		"scope-timeline-geometry",
+		0,
+		alicorn.layout_style(grow=1, clip=true),
+	)
+	alicorn.container_end(&ui)
+	alicorn.split_first_end(&ui, timeline_split)
+	alicorn.split_divider(&ui, timeline_split)
+	alicorn.split_second_begin(&ui, timeline_split)
 	alicorn.text(
 		&ui,
 		fmt.tprintf("Events  (%d)", view.event_total_count),
@@ -632,6 +725,8 @@ scope_render :: proc(view: ^Scope_View, rt: ^alicorn.Runtime) -> alicorn.Node_ID
 		}
 	}
 	alicorn.container_end(&ui)
+	alicorn.split_second_end(&ui, timeline_split)
+	alicorn.split_end(&ui, timeline_split)
 	alicorn.split_second_end(&ui, inner_split)
 	alicorn.split_end(&ui, inner_split)
 	alicorn.split_first_end(&ui, outer_split)

@@ -2,7 +2,7 @@
   "schema": 1,
   "alicorn": {
     "repository": "https://github.com/samanshaiza004/alicorn.git",
-    "revision": "cc0274b92aff744466847c5058984205c721bb25"
+    "revision": "a0387156cea706b36411c2961394c6d03d227fe9"
   },
   "caliber": {
     "repository": "https://github.com/samanshaiza004/caliber.git",

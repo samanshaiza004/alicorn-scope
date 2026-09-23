@@ -32,6 +32,7 @@ Scope_Backend_API :: struct {
 	request_tracks: proc "c" (trace_generation, query_generation, first: u64, count: u32) -> i32 `dynlib:"Scope_RequestTrackWindow"`,
 	select_event: proc "c" (trace_generation, event_id: u64) -> i32 `dynlib:"Scope_SelectEvent"`,
 	request_window: proc "c" (trace_generation, query_generation, first: u64, count: u32) -> i32 `dynlib:"Scope_RequestEventWindow"`,
+	request_timeline: proc "c" (trace_generation, query_generation, track_id: u64, start_us, end_us: f64, resolution: u32) -> i32 `dynlib:"Scope_RequestTimelineWindow"`,
 	read_state: proc "c" (dst: ^u8, capacity: uintptr, out_length: ^uintptr, revision: ^u64, schema: ^u32) -> i32 `dynlib:"Scope_ReadState"`,
 	read_resource: proc "c" (id, generation: u64, dst: ^u8, capacity: uintptr, out_length: ^uintptr) -> i32 `dynlib:"Scope_ReadResource"`,
 	read_telemetry: proc "c" (dst: ^uintptr, capacity: uintptr, out_count: ^uintptr, sequence: ^u64) -> i32 `dynlib:"Scope_ReadTelemetry"`,
@@ -47,6 +48,8 @@ Scope_Argument_State :: struct {
 Scope_Selected_Event_State :: struct {
 	available: bool `json:"available"`,
 	id: u64 `json:"id"`,
+	has_query_row: bool `json:"has_query_row"`,
+	query_row: u64 `json:"query_row"`,
 	name: string `json:"name"`,
 	category: string `json:"category"`,
 	timestamp_us: f64 `json:"timestamp_us"`,
@@ -73,8 +76,11 @@ Scope_Published_State :: struct {
 	matching_events: u64 `json:"matching_events"`,
 	visible_events: u64 `json:"visible_events"`,
 	unsupported_phases: u64 `json:"unsupported_phases"`,
+	trace_start_us: f64 `json:"trace_start_us"`,
+	trace_end_us: f64 `json:"trace_end_us"`,
 	tracks_resource: Scope_Resource_Handle `json:"tracks_resource"`,
 	window_resource: Scope_Resource_Handle `json:"window_resource"`,
+	timeline_resource: Scope_Resource_Handle `json:"timeline_resource"`,
 	window_first_row: u64 `json:"window_first_row"`,
 	tracks_first_row: u64 `json:"tracks_first_row"`,
 	selected_event: Scope_Selected_Event_State `json:"selected_event"`,
@@ -86,6 +92,7 @@ Scope_App :: struct {
 	view: frontend.Scope_View,
 	tracks: [dynamic]frontend.Scope_Track,
 	events: [dynamic]frontend.Scope_Event_Row,
+	timeline_rows: [dynamic]frontend.Scope_Timeline_Row,
 	arguments: [dynamic]frontend.Scope_Argument,
 	state: Scope_Published_State,
 	state_bytes: []byte,
@@ -95,6 +102,8 @@ Scope_App :: struct {
 	window_resource: Scope_Resource_Handle,
 	loaded_track_resource: Scope_Resource_Handle,
 	loaded_window_resource: Scope_Resource_Handle,
+	timeline_resource: Scope_Resource_Handle,
+	loaded_timeline_resource: Scope_Resource_Handle,
 	tracks_first_row: u64,
 	window_first_row: u64,
 	view_trace_generation: u64,
@@ -111,6 +120,11 @@ Scope_App :: struct {
 	build_count: u64,
 	wake_count: u64,
 	resource_copy_count: u64,
+	timeline_pointer_events: u64,
+	timeline_requests: u64,
+	timeline_cache_hits: u64,
+	timeline_resource_decodes: u64,
+	timeline_geometry_updates: u64,
 	error: string,
 	dialog_error: string,
 	dialog_error_owned: bool,
@@ -121,6 +135,7 @@ scope_app_new :: proc(backend: Scope_Backend_API, trace_path: string) -> ^Scope_
 	app.backend = backend
 	app.tracks = make([dynamic]frontend.Scope_Track, 0, 256)
 	app.events = make([dynamic]frontend.Scope_Event_Row, 0, SCOPE_EVENT_WINDOW_ROWS)
+	app.timeline_rows = make([dynamic]frontend.Scope_Timeline_Row, 0, 512)
 	app.arguments = make([dynamic]frontend.Scope_Argument, 0, 32)
 	app.state_bytes = make([]byte, SCOPE_RESOURCE_LIMIT)
 	app.resource_scratch = make([]byte, SCOPE_RESOURCE_LIMIT)
@@ -163,6 +178,7 @@ scope_app_destroy :: proc(app: ^Scope_App) {
 	scope_release_rows(app)
 	delete(app.tracks)
 	delete(app.events)
+	delete(app.timeline_rows)
 	delete(app.arguments)
 	scope_state_destroy(&app.state)
 	if app.view.ui.filter_owned && len(app.view.filter) > 0 { delete(app.view.filter) }
@@ -191,7 +207,7 @@ scope_read_state :: proc(app: ^Scope_App) -> bool {
 		app.error = "Caliber state had an invalid JSON payload"
 		return false
 	}
-	if next.schema != schema || next.schema != 1 {
+	if next.schema != schema || next.schema != 2 {
 		scope_state_destroy(&next)
 		app.error = "Unsupported Scope state schema"
 		return false
@@ -214,9 +230,13 @@ scope_read_state :: proc(app: ^Scope_App) -> bool {
 	app.view.load_message = app.state.message
 	app.view_trace_generation = app.state.trace_generation
 	app.view_query_generation = app.state.query_generation
+	app.view.trace_start_us = app.state.trace_start_us
+	app.view.trace_end_us = app.state.trace_end_us
 	app.view.selected_event = frontend.Scope_Event_Detail{
 		available=app.state.selected_event.available,
 		id=app.state.selected_event.id,
+		has_query_row=app.state.selected_event.has_query_row,
+		query_row=int(app.state.selected_event.query_row),
 		timestamp_us=app.state.selected_event.timestamp_us,
 		duration_us=app.state.selected_event.duration_us,
 		name=app.state.selected_event.name,
@@ -231,6 +251,14 @@ scope_read_state :: proc(app: ^Scope_App) -> bool {
 		app.window_resource = {}
 		app.loaded_track_resource = {}
 		app.loaded_window_resource = {}
+		app.timeline_resource = {}
+		app.loaded_timeline_resource = {}
+		scope_release_timeline(app)
+		app.view.timeline_start_us = app.state.trace_start_us
+		app.view.timeline_end_us = app.state.trace_end_us
+		if app.view.timeline_end_us <= app.view.timeline_start_us {
+			app.view.timeline_end_us = app.view.timeline_start_us + 1
+		}
 		app.tracks_first_row = 0
 		app.window_first_row = 0
 		app.view.track_first_row = 0
@@ -249,6 +277,9 @@ scope_read_state :: proc(app: ^Scope_App) -> bool {
 		app.window_resource = {}
 		app.loaded_track_resource = {}
 		app.loaded_window_resource = {}
+		app.timeline_resource = {}
+		app.loaded_timeline_resource = {}
+		scope_release_timeline(app)
 		app.view.track_first_row = 0
 		app.view.event_first_row = 0
 		app.view.ui.has_pending_track_window_request = false
@@ -268,6 +299,7 @@ scope_read_state :: proc(app: ^Scope_App) -> bool {
 	}
 	app.track_resource = app.state.tracks_resource
 	app.window_resource = app.state.window_resource
+	app.timeline_resource = app.state.timeline_resource
 	app.tracks_first_row = app.state.tracks_first_row
 	app.view.track_first_row = int(app.state.tracks_first_row)
 	app.window_first_row = app.state.window_first_row
@@ -378,6 +410,18 @@ scope_decode_tracks :: proc(app: ^Scope_App) -> bool {
 	app.tracks_first_row = first_row
 	app.view.track_first_row = int(first_row)
 	app.view.track_total_count = int(total_count)
+	app.view.timeline_revision += 1
+	if app.view.timeline_revision == 0 { app.view.timeline_revision = 1 }
+	if !app.view.ui.has_selected_track {
+		for track in app.tracks {
+			if track.enabled {
+				app.view.ui.has_selected_track = true
+				app.view.ui.selected_track_id = track.id
+				frontend.scope_publish_interaction(&app.view, .Track_Selected, track.id, 0)
+				break
+			}
+		}
+	}
 	return true
 }
 
@@ -442,6 +486,140 @@ scope_decode_events :: proc(app: ^Scope_App) -> bool {
 	return true
 }
 
+scope_release_timeline :: proc(app: ^Scope_App) {
+	clear(&app.timeline_rows)
+	app.view.timeline_rows = app.timeline_rows[:]
+	app.view.timeline_mode = .None
+	app.view.timeline_total_events = 0
+	app.view.timeline_ready = false
+	app.view.timeline_cache_track_id = 0
+	app.view.timeline_cache_trace_generation = 0
+	app.view.timeline_cache_query_generation = 0
+	app.view.timeline_cache_start_us = 0
+	app.view.timeline_cache_end_us = 0
+	app.view.timeline_request_pending = false
+	app.view.timeline_revision += 1
+	if app.view.timeline_revision == 0 { app.view.timeline_revision = 1 }
+}
+
+scope_decode_timeline :: proc(app: ^Scope_App) -> bool {
+	if app.timeline_resource.id == 0 { return false }
+	data, ok := scope_copy_resource(app, app.timeline_resource)
+	if !ok || len(data) < 64 || string(data[:4]) != "SCTW" || scope_wire_u16(data, 4) != 1 || scope_wire_u16(data, 6) != 64 { return false }
+	trace_generation := scope_wire_u64(data, 8)
+	query_generation := scope_wire_u64(data, 16)
+	mode := scope_wire_u32(data, 24)
+	row_count := scope_wire_u32(data, 28)
+	total_count := scope_wire_u64(data, 32)
+	start_us := transmute(f64)scope_wire_u64(data, 40)
+	end_us := transmute(f64)scope_wire_u64(data, 48)
+	resource_track_id := scope_wire_u64(data, 56)
+	rows_offset := u32(64)
+	row_bytes := u32(40)
+	if trace_generation != app.state.trace_generation || query_generation != app.state.query_generation ||
+	   (mode != 1 && mode != 2) || row_count > 512 || (mode == 1 && row_count > 128) ||
+	   (mode == 1 && total_count != u64(row_count)) || rows_offset != 64 || row_bytes != 40 ||
+	   u64(rows_offset)+u64(row_count)*u64(row_bytes) != u64(len(data)) ||
+		resource_track_id != app.view.timeline_request_track_id ||
+	   start_us != start_us || end_us != end_us || end_us <= start_us {
+		return false
+	}
+	decoded := make([dynamic]frontend.Scope_Timeline_Row, 0, int(row_count))
+	for i in 0..<int(row_count) {
+		base := int(rows_offset)+i*40
+		row: frontend.Scope_Timeline_Row
+		if mode == 1 {
+			row.event_id = scope_wire_u64(data, base)
+			row.track_id = scope_wire_u64(data, base+8)
+			row.timestamp_us = transmute(f64)scope_wire_u64(data, base+16)
+			row.duration_us = transmute(f64)scope_wire_u64(data, base+24)
+			row.kind = scope_wire_u32(data, base+32)
+			if row.track_id == 0 || row.timestamp_us != row.timestamp_us || row.duration_us != row.duration_us || row.duration_us < 0 ||
+			   (row.kind != 1 && row.kind != 2) || scope_wire_u32(data, base+36) != 0 {
+				delete(decoded)
+				return false
+			}
+		} else {
+			row.track_id = scope_wire_u64(data, base)
+			row.bucket_start_us = transmute(f64)scope_wire_u64(data, base+8)
+			row.bucket_end_us = transmute(f64)scope_wire_u64(data, base+16)
+			row.event_count = scope_wire_u64(data, base+24)
+			row.duration_sum_us = transmute(f64)scope_wire_u64(data, base+32)
+			if row.track_id == 0 || row.bucket_start_us != row.bucket_start_us || row.bucket_end_us != row.bucket_end_us ||
+			   row.duration_sum_us != row.duration_sum_us || row.bucket_end_us <= row.bucket_start_us || row.duration_sum_us < 0 {
+				delete(decoded)
+				return false
+			}
+		}
+		if row.track_id == 0 || (app.view.timeline_request_track_id != 0 && row.track_id != app.view.timeline_request_track_id) {
+			delete(decoded)
+			return false
+		}
+		append(&decoded, row)
+	}
+	clear(&app.timeline_rows)
+	for row in decoded { append(&app.timeline_rows, row) }
+	delete(decoded)
+	app.view.timeline_rows = app.timeline_rows[:]
+	app.view.timeline_mode = .Raw if mode == 1 else .Aggregate
+	app.view.timeline_total_events = total_count
+	app.view.timeline_cache_start_us = start_us
+	app.view.timeline_cache_end_us = end_us
+	app.view.timeline_cache_track_id = app.view.timeline_request_track_id
+	app.view.timeline_cache_trace_generation = trace_generation
+	app.view.timeline_cache_query_generation = query_generation
+	app.view.timeline_ready = true
+	app.view.timeline_request_pending = false
+	app.view.timeline_revision += 1
+	if app.view.timeline_revision == 0 { app.view.timeline_revision = 1 }
+	app.timeline_resource_decodes += 1
+	return true
+}
+
+scope_request_timeline :: proc(app: ^Scope_App) -> bool {
+	view := &app.view
+	if app.state.status != "ready" || view.timeline_request_pending || view.timeline_end_us <= view.timeline_start_us {
+		return false
+	}
+	requested_track_id: u64 = 0
+	if view.track_first_row >= SCOPE_EVENT_WINDOW_ROWS && view.ui.has_selected_track {
+		requested_track_id = view.ui.selected_track_id
+	}
+	if view.timeline_ready && view.timeline_cache_track_id == requested_track_id &&
+	   view.timeline_cache_trace_generation == app.state.trace_generation && view.timeline_cache_query_generation == app.state.query_generation &&
+	   view.timeline_cache_start_us <= view.timeline_start_us && view.timeline_cache_end_us >= view.timeline_end_us {
+		app.timeline_cache_hits += 1
+		return false
+	}
+	span := view.timeline_end_us-view.timeline_start_us
+	start_us := view.timeline_start_us-span*0.5
+	end_us := view.timeline_end_us+span*0.5
+	trace_span := view.trace_end_us-view.trace_start_us
+	if trace_span <= 0 { trace_span = 1 }
+	if start_us < view.trace_start_us { start_us = view.trace_start_us }
+	if end_us > view.trace_end_us { end_us = view.trace_end_us }
+	if end_us <= start_us {
+		start_us = view.trace_start_us
+		end_us = view.trace_end_us
+		if end_us <= start_us { end_us = start_us+1 }
+	}
+	if end_us-start_us > trace_span*2 {
+		start_us = view.trace_start_us
+		end_us = view.trace_end_us
+	}
+	status := app.backend.request_timeline(app.state.trace_generation, app.state.query_generation, requested_track_id, start_us, end_us, 256)
+	if status != Caliber_Status_OK {
+		app.view.load_message = "Could not request timeline window"
+		return false
+	}
+	view.timeline_request_pending = true
+	view.timeline_request_track_id = requested_track_id
+	view.timeline_request_start_us = start_us
+	view.timeline_request_end_us = end_us
+	app.timeline_requests += 1
+	return true
+}
+
 scope_refresh_view :: proc(app: ^Scope_App) -> bool {
 	if !scope_read_state(app) { return false }
 	changed := true
@@ -456,6 +634,12 @@ scope_refresh_view :: proc(app: ^Scope_App) -> bool {
 		if scope_decode_events(app) {
 			app.loaded_window_resource = app.window_resource
 			frontend.scope_ack_cached_window(&app.view)
+			changed = true
+		}
+	}
+	if app.timeline_resource.id != 0 && (app.timeline_resource.id != app.loaded_timeline_resource.id || app.timeline_resource.generation != app.loaded_timeline_resource.generation) {
+		if scope_decode_timeline(app) {
+			app.loaded_timeline_resource = app.timeline_resource
 			changed = true
 		}
 	}
@@ -539,6 +723,8 @@ scope_consume_interaction :: proc(app: ^Scope_App, rt: ^alicorn.Runtime) {
 		enabled := i32(0)
 		if interaction.enabled { enabled = 1 }
 		_ = app.backend.set_track_enabled(app.state.trace_generation, interaction.track_id, enabled)
+	case .Track_Selected:
+		_ = scope_request_timeline(app)
 	case .Track_Window_Requested:
 		first := u64(max(0, interaction.first_row))
 		aligned := (first/u64(SCOPE_EVENT_WINDOW_ROWS))*u64(SCOPE_EVENT_WINDOW_ROWS)
@@ -558,7 +744,223 @@ scope_build :: proc(state: rawptr, rt: ^alicorn.Runtime, logical_width, logical_
 	app.build_count += 1
 	root := frontend.scope_render(&app.view, rt)
 	scope_consume_interaction(app, rt)
+	scope_refresh_timeline_geometry(app, rt)
 	return root
+}
+
+scope_timeline_bump_revision :: proc(view: ^frontend.Scope_View) {
+	view.timeline_revision += 1
+	if view.timeline_revision == 0 { view.timeline_revision = 1 }
+}
+
+scope_timeline_effective_end :: proc(view: frontend.Scope_View) -> f64 {
+	return view.trace_end_us if view.trace_end_us > view.trace_start_us else view.trace_start_us+1
+}
+
+scope_timeline_clamp_range :: proc(view: frontend.Scope_View, start_us, end_us: f64) -> (f64, f64) {
+	start := start_us
+	end := end_us
+	trace_start := view.trace_start_us
+	trace_end := scope_timeline_effective_end(view)
+	trace_span := trace_end-trace_start
+	span := end-start
+	if span <= 0 { span = max(trace_span/1000, 0.000001) }
+	if span >= trace_span { return trace_start, trace_end }
+	if start < trace_start {
+		end += trace_start-start
+		start = trace_start
+	}
+	if end > trace_end {
+		start -= end-trace_end
+		end = trace_end
+	}
+	if start < trace_start { start = trace_start }
+	if end > trace_end { end = trace_end }
+	if end <= start { return trace_start, trace_end }
+	return start, end
+}
+
+scope_timeline_set_range :: proc(app: ^Scope_App, start_us, end_us: f64) -> bool {
+	next_start, next_end := scope_timeline_clamp_range(app.view, start_us, end_us)
+	if next_start == app.view.timeline_start_us && next_end == app.view.timeline_end_us { return false }
+	app.view.timeline_start_us = next_start
+	app.view.timeline_end_us = next_end
+	scope_timeline_bump_revision(&app.view)
+	return true
+}
+
+scope_refresh_timeline_geometry :: proc(app: ^Scope_App, rt: ^alicorn.Runtime) {
+	id := app.view.ui.timeline_surface_node
+	ctx, ok := alicorn.gpu_surface_context(rt, id)
+	if !ok || ctx.logical_bounds.w <= 0 || ctx.logical_bounds.h <= 0 { return }
+	if ctx.logical_bounds.w != app.view.timeline_geometry_width || ctx.logical_bounds.h != app.view.timeline_geometry_height {
+		app.view.timeline_geometry_width = ctx.logical_bounds.w
+		app.view.timeline_geometry_height = ctx.logical_bounds.h
+		scope_timeline_bump_revision(&app.view)
+	}
+	if app.view.timeline_geometry_revision == app.view.timeline_revision { return }
+	segments := make([dynamic]alicorn.GPU_Surface_Line_Segment, 0, 512, allocator=context.temp_allocator)
+	circles := make([dynamic]alicorn.GPU_Surface_Filled_Circle, 0, 32, allocator=context.temp_allocator)
+	defer delete(segments)
+	defer delete(circles)
+	width, height := ctx.logical_bounds.w, ctx.logical_bounds.h
+	span := app.view.timeline_end_us-app.view.timeline_start_us
+	if span <= 0 { span = 1 }
+	selected_color := alicorn.Color{0.96, 0.98, 1.0, 1}
+	complete_color := alicorn.Color{0.18, 0.76, 0.96, 0.94}
+	instant_color := alicorn.Color{0.98, 0.67, 0.24, 1}
+	if app.view.timeline_ready && app.view.timeline_mode == .Raw {
+		for row in app.view.timeline_rows {
+			y, found := frontend.scope_timeline_track_y(app.view, row.track_id, height)
+			if !found { continue }
+			x := f32((row.timestamp_us-app.view.timeline_start_us)/span)*width
+			x = clamp(x, 0, width)
+			color := complete_color
+			if row.track_id == app.view.ui.selected_track_id { color = alicorn.Color{0.26, 0.88, 0.98, 1} }
+			if row.event_id == app.view.ui.selected_event_id { color = selected_color }
+			if row.kind == 2 {
+				append(&circles, alicorn.GPU_Surface_Filled_Circle{center={x, y}, radius=3.4, color=instant_color})
+				if row.event_id == app.view.ui.selected_event_id {
+					append(&circles, alicorn.GPU_Surface_Filled_Circle{center={x, y}, radius=4.8, color=selected_color})
+				}
+			} else {
+				x_end := f32((row.timestamp_us+row.duration_us-app.view.timeline_start_us)/span)*width
+				x_end = clamp(x_end, 0, width)
+				if x_end-x < 1 { x_end = min(width, x+1) }
+				if x_end > x {
+					append(&segments, alicorn.GPU_Surface_Line_Segment{start={x, y}, end={x_end, y}, thickness=5, color=color})
+				}
+			}
+		}
+	} else if app.view.timeline_ready && app.view.timeline_mode == .Aggregate {
+		peak: u64 = 1
+		for row in app.view.timeline_rows { peak = max(peak, row.event_count) }
+		for row in app.view.timeline_rows {
+			if row.event_count == 0 { continue }
+			center_y, found := frontend.scope_timeline_track_y(app.view, row.track_id, height)
+			if !found { continue }
+			center_us := (row.bucket_start_us+row.bucket_end_us)*0.5
+			x := f32((center_us-app.view.timeline_start_us)/span)*width
+			amplitude := min(f32(row.event_count)/f32(peak), 1)
+			track_height := height/f32(max(1, len(app.view.tracks)))
+			bar_height := max(2, amplitude*max(track_height-2, 2))
+			color := complete_color
+			if row.track_id == app.view.ui.selected_track_id { color = alicorn.Color{0.26, 0.88, 0.98, 1} }
+			append(&segments, alicorn.GPU_Surface_Line_Segment{
+				start={x, center_y+bar_height*0.5}, end={x, center_y-bar_height*0.5},
+				thickness=max(1.2, width/f32(max(1, len(app.view.timeline_rows)))*0.72),
+				color=color,
+			})
+		}
+	}
+	if alicorn.gpu_surface_update_geometry(rt, id, app.view.timeline_revision, segments[:], circles[:]) {
+		app.view.timeline_geometry_revision = app.view.timeline_revision
+		app.timeline_geometry_updates += 1
+	}
+}
+
+scope_timeline_hit_test :: proc(view: frontend.Scope_View, x, y, width, height: f32) -> (event_id: u64, found: bool) {
+	if !view.timeline_ready || view.timeline_mode != .Raw || width <= 0 || height <= 0 { return 0, false }
+	span := view.timeline_end_us-view.timeline_start_us
+	if span <= 0 { return 0, false }
+	best_score := f32(10*10)
+	for row in view.timeline_rows {
+		center_y, found := frontend.scope_timeline_track_y(view, row.track_id, height)
+		if !found { continue }
+		start_x := clamp(f32((row.timestamp_us-view.timeline_start_us)/span)*width, 0, width)
+		end_x := start_x
+		if row.kind == 1 {
+			end_x = clamp(f32((row.timestamp_us+row.duration_us-view.timeline_start_us)/span)*width, 0, width)
+			if end_x-start_x < 1 { end_x = min(width, start_x+1) }
+		}
+		nearest_x := clamp(x, start_x, end_x)
+		dx, dy := x-nearest_x, y-center_y
+		distance_squared := dx*dx+dy*dy
+		if distance_squared <= best_score {
+			best_score, event_id, found = distance_squared, row.event_id, true
+		}
+	}
+	return
+}
+
+scope_on_pointer :: proc(state: rawptr, rt: ^alicorn.Runtime, event: alicorn.Pointer_Event, target: alicorn.Node_ID) {
+	app := cast(^Scope_App)state
+	view := &app.view
+	id := view.ui.timeline_surface_node
+	if target == id || view.timeline_drag_active { app.timeline_pointer_events += 1 }
+	if event.kind == .Cancel || (event.kind == .Down && target != id) {
+		view.timeline_drag_active = false
+		return
+	}
+	ctx, ok := alicorn.gpu_surface_context(rt, id)
+	if !ok { view.timeline_drag_active = false; return }
+	if event.kind == .Down && event.button == 1 && target == id {
+		view.timeline_drag_active = true
+		view.timeline_drag_moved = false
+		view.timeline_drag_start_x = event.x
+		view.timeline_drag_start_time = view.timeline_start_us
+		view.timeline_drag_start_end = view.timeline_end_us
+		return
+	}
+	if event.kind == .Move && view.timeline_drag_active {
+		delta_x := event.x-view.timeline_drag_start_x
+		abs_x := delta_x
+		if abs_x < 0 { abs_x = -abs_x }
+		if abs_x > 3 { view.timeline_drag_moved = true }
+		if view.timeline_drag_moved && ctx.logical_bounds.w > 0 {
+			span := view.timeline_drag_start_end-view.timeline_drag_start_time
+			shift := -f64(delta_x/ctx.logical_bounds.w)*span
+			if scope_timeline_set_range(app, view.timeline_drag_start_time+shift, view.timeline_drag_start_end+shift) {
+				scope_refresh_timeline_geometry(app, rt)
+			}
+		}
+		return
+	}
+	if event.kind == .Up && view.timeline_drag_active {
+		was_drag := view.timeline_drag_moved
+		view.timeline_drag_active = false
+		if was_drag {
+			_ = scope_request_timeline(app)
+		} else if target == id {
+			local_x := event.x-ctx.logical_bounds.x
+			event_in_clip := event.x >= ctx.clip.x && event.x <= ctx.clip.x+ctx.clip.w && event.y >= ctx.clip.y && event.y <= ctx.clip.y+ctx.clip.h
+			if event_in_clip {
+				local_y := event.y-ctx.logical_bounds.y
+				if event_id, found := scope_timeline_hit_test(view^, local_x, local_y, ctx.logical_bounds.w, ctx.logical_bounds.h); found {
+					view.ui.has_selected_event = true
+					view.ui.selected_event_id = event_id
+					view.ui.has_selected_event_row = false
+					view.ui.has_pending_navigation_row = false
+					frontend.scope_publish_interaction(view, .Event_Selected, 0, event_id)
+					scope_timeline_bump_revision(view)
+					alicorn.invalidate_root(rt, "scope timeline selected event")
+				}
+			}
+		}
+	}
+}
+
+scope_on_scroll :: proc(state: rawptr, rt: ^alicorn.Runtime, event: alicorn.Scroll_Event) {
+	app := cast(^Scope_App)state
+	ctx, ok := alicorn.gpu_surface_context(rt, app.view.ui.timeline_surface_node)
+	if !ok || ctx.logical_bounds.w <= 0 || event.x < ctx.clip.x || event.x > ctx.clip.x+ctx.clip.w || event.y < ctx.clip.y || event.y > ctx.clip.y+ctx.clip.h { return }
+	zoom_modifier := event.modifiers.control
+	when ODIN_OS == .Darwin { zoom_modifier = event.modifiers.super }
+	if !zoom_modifier { return }
+	if event.delta_y == 0 { return }
+	factor := clamp(1-f64(event.delta_y)*0.12, 0.25, 4.0)
+	old_start, old_end := app.view.timeline_start_us, app.view.timeline_end_us
+	old_span := old_end-old_start
+	if old_span <= 0 { return }
+	anchor := old_start+f64(clamp((event.x-ctx.logical_bounds.x)/ctx.logical_bounds.w, 0, 1))*old_span
+	trace_span := scope_timeline_effective_end(app.view)-app.view.trace_start_us
+	new_span := clamp(old_span*factor, max(trace_span/1_000_000, 0.000001), trace_span)
+	anchor_ratio := (anchor-old_start)/old_span
+	new_start := anchor-anchor_ratio*new_span
+	if scope_timeline_set_range(app, new_start, new_start+new_span) {
+		scope_refresh_timeline_geometry(app, rt)
+		_ = scope_request_timeline(app)
+	}
 }
 
 scope_on_text_change :: proc(state: rawptr, rt: ^alicorn.Runtime, change: alicorn.Text_Change) {
@@ -574,6 +976,32 @@ scope_on_key :: proc(state: rawptr, rt: ^alicorn.Runtime, key: host.Application_
 	case .Down:      return frontend.scope_on_navigation_key(&app.view, rt, .Down)
 	case .Page_Up:   return frontend.scope_on_navigation_key(&app.view, rt, .Page_Up)
 	case .Page_Down: return frontend.scope_on_navigation_key(&app.view, rt, .Page_Down)
+	case .Home:
+		if scope_timeline_set_range(app, app.view.trace_start_us, scope_timeline_effective_end(app.view)) {
+			scope_refresh_timeline_geometry(app, rt)
+			_ = scope_request_timeline(app)
+			return true
+		}
+	case .Fit_Selection:
+		if !app.view.ui.has_selected_event { return false }
+		selected_start := app.view.selected_event.timestamp_us
+		selected_duration := app.view.selected_event.duration_us
+		if !app.view.selected_event.available || app.view.selected_event.id != app.view.ui.selected_event_id {
+			for row in app.view.timeline_rows {
+				if row.event_id == app.view.ui.selected_event_id && app.view.timeline_mode == .Raw {
+					selected_start, selected_duration = row.timestamp_us, row.duration_us
+					break
+				}
+			}
+		}
+		trace_span := scope_timeline_effective_end(app.view)-app.view.trace_start_us
+		selection_span := max(selected_duration, trace_span/100_000)
+		if selection_span <= 0 { selection_span = max(trace_span/1000, 0.000001) }
+		if scope_timeline_set_range(app, selected_start-selection_span*2, selected_start+max(selected_duration, selection_span)*2) {
+			scope_refresh_timeline_geometry(app, rt)
+			_ = scope_request_timeline(app)
+			return true
+		}
 	}
 	return false
 }
@@ -628,6 +1056,14 @@ scope_on_wake :: proc(state: rawptr, rt: ^alicorn.Runtime) {
 	app.wake_count += 1
 	state_changed := scope_refresh_view(app)
 	telemetry_changed := scope_refresh_telemetry(app)
+	if app.view.ui.has_selected_event && app.view.selected_event.available && app.view.selected_event.id == app.view.ui.selected_event_id && app.view.selected_event.has_query_row && (!app.view.ui.has_selected_event_row || app.view.ui.selected_event_row != app.view.selected_event.query_row) {
+		app.view.ui.has_selected_event_row = true
+		app.view.ui.selected_event_row = app.view.selected_event.query_row
+		if app.view.ui.events_scroll_node != 0 {
+			_ = alicorn.virtual_list_ensure_visible(rt, app.view.ui.events_scroll_node, app.view.selected_event.query_row, "scope synchronized timeline selection")
+		}
+	}
+	_ = scope_request_timeline(app)
 	if state_changed || telemetry_changed {
 		alicorn.invalidate_root(rt, "Caliber published Scope state or bounded resource")
 	}
@@ -658,6 +1094,14 @@ scope_refresh_telemetry :: proc(app: ^Scope_App) -> bool {
 
 scope_on_stop :: proc(state: rawptr) {
 	app := cast(^Scope_App)state
+	fmt.println(
+		"scope_timeline_metrics",
+		"pointer_events", app.timeline_pointer_events,
+		"window_requests", app.timeline_requests,
+		"cache_hits", app.timeline_cache_hits,
+		"resource_decodes", app.timeline_resource_decodes,
+		"geometry_updates", app.timeline_geometry_updates,
+	)
 	if !app.backend_created { return }
 	_ = app.backend.stop_work()
 	_ = app.backend.stop_waiters()
@@ -673,7 +1117,7 @@ scope_on_stop :: proc(state: rawptr) {
 
 scope_open_backend :: proc(path: string) -> (api: Scope_Backend_API, ok: bool) {
 	count, initialized := dynlib.initialize_symbols(&api, path, "", "_library")
-	if !initialized || count < 15 {
+	if !initialized || count < 16 {
 		if api._library != nil { _ = dynlib.unload_library(api._library) }
 		return {}, false
 	}
@@ -737,6 +1181,8 @@ scope_app_run :: proc(app: ^Scope_App, smoke: bool) {
 		build=scope_build,
 		on_text_change=scope_on_text_change,
 		on_key=scope_on_key,
+		on_pointer=scope_on_pointer,
+		on_scroll=scope_on_scroll,
 		on_tick=nil,
 		on_services=scope_on_services,
 		on_start=scope_on_start,
