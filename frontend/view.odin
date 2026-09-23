@@ -632,7 +632,7 @@ scope_render :: proc(view: ^Scope_View, rt: ^alicorn.Runtime) -> alicorn.Node_ID
 		label="scope-timeline-panel",
 		style=alicorn.layout_style(grow=1, gap=4, clip=true),
 	)
-	track_label := "All enabled tracks · overview"
+	track_label := "All tracks"
 	if view.ui.has_selected_track {
 		track_label = "Selected track"
 		for track in view.tracks {
@@ -647,15 +647,15 @@ scope_render :: proc(view: ^Scope_View, rt: ^alicorn.Runtime) -> alicorn.Node_ID
 		if !view.ui.has_selected_track {
 			mode_label = fmt.tprintf("Overview · %d events", view.timeline_total_events)
 		} else {
-			mode_label = fmt.tprintf("%d events in range", view.timeline_total_events)
+			mode_label = fmt.tprintf("Events · %d in range", view.timeline_total_events)
 			if view.timeline_mode == .Aggregate { mode_label = fmt.tprintf("Density · %d events", view.timeline_total_events) }
 		}
 	}
 	alicorn.container_begin(&ui, .Container, label="scope-timeline-heading", style=alicorn.layout_style(.Row, height=28, gap=8, align=.Center))
 	if view.ui.has_selected_track && alicorn.button(
 		&ui,
-		"All tracks",
-		style=alicorn.layout_style(.Row, width=82, height=24),
+		"← All tracks",
+		style=alicorn.layout_style(.Row, width=104, height=24),
 	) {
 		view.ui.has_selected_track = false
 		view.ui.selected_track_id = 0

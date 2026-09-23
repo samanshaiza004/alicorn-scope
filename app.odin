@@ -904,8 +904,9 @@ scope_refresh_timeline_geometry :: proc(app: ^Scope_App, rt: ^alicorn.Runtime) {
 			x := (f32(bucket)+0.5)*bucket_width_px
 			alpha := f32(0.58+0.42*count_level)
 			color := alicorn.Color{complete_color.r, complete_color.g, complete_color.b, alpha}
+			baseline_y := height-5
 			append(&segments, alicorn.GPU_Surface_Line_Segment{
-				start={x, center_y+bar_height*0.5}, end={x, center_y-bar_height*0.5},
+				start={x, baseline_y}, end={x, max(4, baseline_y-bar_height)},
 				thickness=bar_thickness,
 				color=color,
 			})
