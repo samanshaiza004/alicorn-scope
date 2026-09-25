@@ -770,7 +770,11 @@ scope_capture_runtime_inspection :: proc(app: ^Scope_App, rt: ^alicorn.Runtime) 
 	defer delete(events)
 	for event in events {
 		if event.sequence <= app.last_trace_sequence { continue }
-		scope_runtime_record(app, fmt.tprintf("%06d  %v  node=%d  %s", event.sequence, event.kind, event.node, event.reason))
+		if event.cause_id == 0 {
+			scope_runtime_record(app, fmt.tprintf("%06d  %v  no cause  node=%d  %s", event.sequence, event.kind, event.node, event.reason))
+		} else {
+			scope_runtime_record(app, fmt.tprintf("%06d  %v  cause #%d · %v · command %d  node=%d  %s", event.sequence, event.kind, event.cause_id, event.cause_kind, event.command_id, event.node, event.reason))
+		}
 		app.last_trace_sequence = event.sequence
 	}
 	inspection := alicorn.inspect(rt)
@@ -790,7 +794,9 @@ scope_capture_runtime_inspection :: proc(app: ^Scope_App, rt: ^alicorn.Runtime) 
 
 scope_dispatch_command :: proc(app: ^Scope_App, rt: ^alicorn.Runtime, command: frontend.Scope_Command_ID) -> bool {
 	if command == .None || !frontend.scope_command_enabled(app.view, command) { return false }
+	command_cause := alicorn.cause_begin(rt, .Application, "Scope semantic command", u32(command))
 	scope_runtime_record(app, fmt.tprintf("Command · %s", frontend.scope_command_label(command)))
+	alicorn.trace_command(rt, u32(command), frontend.scope_command_label(command))
 	if app.view.ui.command_palette_open && command != .Toggle_Command_Palette {
 		app.view.ui.command_palette_open = false
 		app.view.ui.focus_restore_pending = true
@@ -814,7 +820,10 @@ scope_dispatch_command :: proc(app: ^Scope_App, rt: ^alicorn.Runtime, command: f
 		}
 		changed = true
 	case .Fit_Selection:
-		if !app.view.ui.has_selected_event { return false }
+		if !app.view.ui.has_selected_event {
+			alicorn.cause_end(rt, command_cause)
+			return false
+		}
 		selected_start := app.view.selected_event.timestamp_us
 		selected_duration := app.view.selected_event.duration_us
 		if !app.view.selected_event.available || app.view.selected_event.id != app.view.ui.selected_event_id {
@@ -863,7 +872,11 @@ scope_dispatch_command :: proc(app: ^Scope_App, rt: ^alicorn.Runtime, command: f
 		changed = true
 	}
 	scope_update_native_menu_state(app)
-	if changed { alicorn.invalidate_root(rt, "Scope semantic command dispatched") }
+	if changed {
+		alicorn.trace_mutation(rt, "Scope state changed by semantic command")
+		alicorn.invalidate_root(rt, "Scope semantic command dispatched")
+	}
+	alicorn.cause_end(rt, command_cause)
 	return true
 }
 
@@ -901,13 +914,16 @@ scope_consume_interaction :: proc(app: ^Scope_App, rt: ^alicorn.Runtime) {
 	case .Command_Invoked:
 		_ = scope_dispatch_command(app, rt, interaction.command_id)
 	case .Filter_Changed:
+		alicorn.trace_mutation(rt, "Scope event filter changed")
 		filter_ptr := strings.unsafe_string_to_cstring(app.view.filter)
 		_ = app.backend.set_filter(filter_ptr, uintptr(len(app.view.filter)))
 	case .Track_Toggled:
+		alicorn.trace_mutation(rt, "Scope track enabled state changed")
 		enabled := i32(0)
 		if interaction.enabled { enabled = 1 }
 		_ = app.backend.set_track_enabled(app.state.trace_generation, interaction.track_id, enabled)
 	case .Track_Selected:
+		alicorn.trace_mutation(rt, "Scope track selection changed")
 		// Track focus clears the prior event selection in the frontend; keep
 		// the backend's committed inspector state in sync as well.
 		_ = app.backend.select_event(app.state.trace_generation, interaction.event_id)
@@ -917,6 +933,7 @@ scope_consume_interaction :: proc(app: ^Scope_App, rt: ^alicorn.Runtime) {
 		aligned := (first/u64(SCOPE_EVENT_WINDOW_ROWS))*u64(SCOPE_EVENT_WINDOW_ROWS)
 		_ = app.backend.request_tracks(app.state.trace_generation, app.state.query_generation, aligned, SCOPE_EVENT_WINDOW_ROWS)
 	case .Event_Selected:
+		alicorn.trace_mutation(rt, "Scope event selection committed")
 		_ = app.backend.select_event(app.state.trace_generation, interaction.event_id)
 	case .Window_Requested:
 		first := u64(max(0, interaction.first_row))
@@ -1196,6 +1213,7 @@ scope_on_pointer :: proc(state: rawptr, rt: ^alicorn.Runtime, event: alicorn.Poi
 			span := view.timeline_drag_start_end-view.timeline_drag_start_time
 			shift := -f64(delta_x/ctx.logical_bounds.w)*span
 			if scope_timeline_set_range(app, view.timeline_drag_start_time+shift, view.timeline_drag_start_end+shift) {
+				alicorn.trace_mutation(rt, "Scope timeline viewport panned")
 				scope_refresh_timeline_geometry(app, rt)
 			}
 		}
@@ -1217,6 +1235,7 @@ scope_on_pointer :: proc(state: rawptr, rt: ^alicorn.Runtime, event: alicorn.Poi
 					view.ui.has_selected_event_row = false
 					view.ui.has_pending_navigation_row = false
 					frontend.scope_publish_interaction(view, .Event_Selected, 0, event_id)
+					alicorn.trace_mutation(rt, "Scope timeline event selected")
 					alicorn.invalidate_root(rt, "scope timeline selected event")
 				}
 			}
@@ -1242,6 +1261,7 @@ scope_on_scroll :: proc(state: rawptr, rt: ^alicorn.Runtime, event: alicorn.Scro
 	anchor_ratio := (anchor-old_start)/old_span
 	new_start := anchor-anchor_ratio*new_span
 	if scope_timeline_set_range(app, new_start, new_start+new_span) {
+		alicorn.trace_mutation(rt, "Scope timeline viewport zoomed")
 		scope_refresh_timeline_geometry(app, rt)
 		_ = scope_request_timeline(app)
 	}
@@ -1249,6 +1269,7 @@ scope_on_scroll :: proc(state: rawptr, rt: ^alicorn.Runtime, event: alicorn.Scro
 
 scope_on_text_change :: proc(state: rawptr, rt: ^alicorn.Runtime, change: alicorn.Text_Change) {
 	app := cast(^Scope_App)state
+	if change.changed { alicorn.trace_mutation(rt, "Scope command palette query changed") }
 	frontend.scope_on_text_change(&app.view, rt, change)
 }
 
@@ -1359,6 +1380,7 @@ scope_on_wake :: proc(state: rawptr, rt: ^alicorn.Runtime) {
 	}
 	_ = scope_request_timeline(app)
 	if state_changed || telemetry_changed {
+		alicorn.trace_mutation(rt, "Scope async result applied")
 		alicorn.invalidate_root(rt, "Caliber published Scope state or bounded resource")
 	}
 }
