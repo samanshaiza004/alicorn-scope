@@ -4,6 +4,8 @@ A read-only trace explorer built with a Go domain backend, Caliber's bounded
 foreign boundary, and an Odin/Alicorn native frontend. Phase 1 provides trace
 loading, filtering, tracks, a virtualized event table, and inspection. Phase 2
 adds a directly manipulated timeline with bounded event and aggregate windows.
+Phase 3 adds semantic commands, platform-native menus where available, a
+command palette, and an on-demand runtime inspector.
 
 ## Build and run
 
@@ -51,3 +53,5 @@ The resolver and detailed prerequisite/override behavior are documented in
 independently with `go test ./...`; set `SCOPE_STRESS=1` to include the
 1,000,000-event stress test. See [`docs/validation.md`](docs/validation.md)
 and [`docs/phase-2.md`](docs/phase-2.md) for the recorded validation gates.
+See [`docs/phase-3.md`](docs/phase-3.md) for the command and runtime-inspection
+workflow.

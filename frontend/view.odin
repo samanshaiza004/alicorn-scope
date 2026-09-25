@@ -65,7 +65,33 @@ Scope_Interaction_Kind :: enum {
 	Filter_Changed,
 	Track_Window_Requested,
 	Window_Requested,
-	Open_Trace,
+	Command_Invoked,
+}
+
+// Commands describe application operations, not individual data entities.
+// The host's menu IDs carry the same numeric identity into Scope's dispatcher.
+Scope_Command_ID :: enum u32 {
+	None = 0,
+	Open_Trace = 1,
+	Show_Overview = 2,
+	Fit_Trace = 3,
+	Fit_Selection = 4,
+	Previous_Event = 5,
+	Next_Event = 6,
+	Toggle_Runtime_Inspector = 7,
+	Toggle_Command_Palette = 8,
+	Clear_Selection = 9,
+}
+
+Scope_Command_Descriptor :: struct {
+	id: Scope_Command_ID,
+	label: string,
+	shortcut: string,
+	enabled: bool,
+}
+
+Scope_Runtime_Activity :: struct {
+	text: string,
 }
 
 // The Go/FFI adapter can consume interactions by observing sequence. Clear the
@@ -77,6 +103,7 @@ Scope_Interaction_Result :: struct {
 	event_id: u64,
 	first_row: int,
 	enabled: bool,
+	command_id: Scope_Command_ID,
 }
 
 Scope_Timeline_Mode :: enum { None, Raw, Aggregate }
@@ -108,11 +135,23 @@ Scope_UI_State :: struct {
 	pending_track_window_first_row: int,
 
 	filter_node: alicorn.Node_ID,
+	command_palette_node: alicorn.Node_ID,
 	tracks_scroll_node: alicorn.Node_ID,
 	events_scroll_node: alicorn.Node_ID,
 	arguments_scroll_node: alicorn.Node_ID,
 	timeline_surface_node: alicorn.Node_ID,
 	filter_owned: bool,
+	command_palette_open: bool,
+	command_palette_query_owned: bool,
+	command_palette_focus_pending: bool,
+	focus_restore_pending: bool,
+	show_runtime_inspector: bool,
+	command_palette_query: string,
+	focus_before_palette: alicorn.Node_ID,
+	palette_selected_index: int,
+	palette_visible_count: int,
+	palette_visible_commands: [9]Scope_Command_ID,
+	palette_visible_scores: [9]int,
 }
 
 // Scope_View is the bounded view model passed between FFI glue and the Odin
@@ -155,6 +194,8 @@ Scope_View :: struct {
 	timeline_request_start_us, timeline_request_end_us: f64,
 
 	filter: string,
+	runtime_inspection: string,
+	runtime_activity: []Scope_Runtime_Activity,
 	interaction: Scope_Interaction_Result,
 	ui: Scope_UI_State,
 }
@@ -191,6 +232,100 @@ scope_load_status_text :: proc(view: Scope_View) -> string {
 	return ""
 }
 
+scope_command_descriptors :: proc(view: Scope_View) -> [9]Scope_Command_Descriptor {
+	ready := view.load_status == .Ready
+	return {
+		{id=.Open_Trace, label="Open Trace...", shortcut="Ctrl/Cmd+O", enabled=true},
+		{id=.Show_Overview, label="Show Overview", shortcut="", enabled=view.ui.has_selected_track},
+		{id=.Fit_Trace, label="Fit Whole Trace", shortcut="Home", enabled=ready},
+		{id=.Fit_Selection, label="Fit Selection", shortcut="F", enabled=view.ui.has_selected_event},
+		{id=.Previous_Event, label="Previous Event", shortcut="", enabled=view.event_total_count > 0},
+		{id=.Next_Event, label="Next Event", shortcut="", enabled=view.event_total_count > 0},
+		{id=.Toggle_Runtime_Inspector, label="Toggle Runtime Inspector", shortcut="", enabled=true},
+		{id=.Toggle_Command_Palette, label="Command Palette", shortcut="Ctrl/Cmd+Shift+P", enabled=true},
+		{id=.Clear_Selection, label="Clear Event Selection", shortcut="", enabled=view.ui.has_selected_event},
+	}
+}
+
+scope_command_label :: proc(id: Scope_Command_ID) -> string {
+	for descriptor in scope_command_descriptors(Scope_View{}) {
+		if descriptor.id == id { return descriptor.label }
+	}
+	return "Unknown command"
+}
+
+scope_command_enabled :: proc(view: Scope_View, id: Scope_Command_ID) -> bool {
+	for descriptor in scope_command_descriptors(view) {
+		if descriptor.id == id { return descriptor.enabled }
+	}
+	return false
+}
+
+scope_fold_ascii :: proc(value: u8) -> u8 {
+	if value >= 'A' && value <= 'Z' { return value + ('a'-'A') }
+	return value
+}
+
+// A compact case-insensitive subsequence score is sufficient for Scope's
+// small command set; it rewards word starts and adjacent character matches.
+scope_command_match_score :: proc(query, label: string) -> int {
+	if len(query) == 0 { return 0 }
+	query_index := 0
+	last_match := -2
+	score := 0
+	for index := 0; index < len(label) && query_index < len(query); index += 1 {
+		if scope_fold_ascii(label[index]) != scope_fold_ascii(query[query_index]) { continue }
+		if index == 0 || label[index-1] == ' ' { score += 8 }
+		if index == last_match+1 { score += 5 }
+		score -= index
+		last_match = index
+		query_index += 1
+	}
+	if query_index != len(query) { return -1 }
+	return score
+}
+
+scope_prepare_command_palette :: proc(view: ^Scope_View) {
+	view.ui.palette_visible_count = 0
+	descriptors := scope_command_descriptors(view^)
+	for descriptor in descriptors {
+		if !descriptor.enabled { continue }
+		score := scope_command_match_score(view.ui.command_palette_query, descriptor.label)
+		if score < 0 { continue }
+		insert_at := view.ui.palette_visible_count
+		if insert_at >= len(view.ui.palette_visible_commands) { continue }
+		for insert_at > 0 && view.ui.palette_visible_scores[insert_at-1] < score {
+			view.ui.palette_visible_commands[insert_at] = view.ui.palette_visible_commands[insert_at-1]
+			view.ui.palette_visible_scores[insert_at] = view.ui.palette_visible_scores[insert_at-1]
+			insert_at -= 1
+		}
+		view.ui.palette_visible_commands[insert_at] = descriptor.id
+		view.ui.palette_visible_scores[insert_at] = score
+		view.ui.palette_visible_count += 1
+	}
+	if view.ui.palette_visible_count == 0 {
+		view.ui.palette_selected_index = 0
+	} else {
+		view.ui.palette_selected_index = clamp(view.ui.palette_selected_index, 0, view.ui.palette_visible_count-1)
+	}
+}
+
+scope_show_overview :: proc(view: ^Scope_View) -> bool {
+	if !view.ui.has_selected_track { return false }
+	view.ui.has_selected_track = false
+	view.ui.selected_track_id = 0
+	view.ui.has_selected_event = false
+	view.ui.selected_event_id = 0
+	view.ui.has_selected_event_row = false
+	view.ui.has_pending_navigation_row = false
+	view.timeline_request_pending = false
+	view.timeline_ready = false
+	view.timeline_mode = .None
+	view.timeline_revision += 1
+	if view.timeline_revision == 0 { view.timeline_revision = 1 }
+	return true
+}
+
 scope_time_text :: proc(microseconds: f64) -> string {
 	return fmt.tprintf("%.3f ms", microseconds/1000.0)
 }
@@ -201,6 +336,7 @@ scope_publish_interaction :: proc(
 	track_id, event_id: u64,
 	first_row: int = 0,
 	enabled := false,
+	command_id := Scope_Command_ID.None,
 ) {
 	sequence := view.interaction.sequence + 1
 	if sequence == 0 { sequence = 1 }
@@ -211,7 +347,12 @@ scope_publish_interaction :: proc(
 		event_id = event_id,
 		first_row = first_row,
 		enabled = enabled,
+		command_id = command_id,
 	}
+}
+
+scope_publish_command :: proc(view: ^Scope_View, command_id: Scope_Command_ID) {
+	scope_publish_interaction(view, .Command_Invoked, 0, 0, command_id=command_id)
 }
 
 scope_cached_event_count :: proc(view: Scope_View) -> int {
@@ -295,6 +436,18 @@ scope_clear_interaction :: proc(view: ^Scope_View) {
 // change.text; this view keeps its own copy for the next build and the FFI
 // adapter can read it after observing .Filter_Changed.
 scope_on_text_change :: proc(view: ^Scope_View, rt: ^alicorn.Runtime, change: alicorn.Text_Change) {
+	if view.ui.command_palette_open && change.node == view.ui.command_palette_node && change.changed {
+		copy, err := strings.clone(change.text)
+		if err != nil { return }
+		if view.ui.command_palette_query_owned && len(view.ui.command_palette_query) > 0 {
+			delete(view.ui.command_palette_query)
+		}
+		view.ui.command_palette_query = copy
+		view.ui.command_palette_query_owned = true
+		view.ui.palette_selected_index = 0
+		alicorn.invalidate_root(rt, "scope command palette query changed")
+		return
+	}
 	if change.node != view.ui.filter_node || !change.changed { return }
 	copy, err := strings.clone(change.text)
 	if err != nil { return }
@@ -309,6 +462,63 @@ scope_on_text_change :: proc(view: ^Scope_View, rt: ^alicorn.Runtime, change: al
 	view.ui.has_pending_track_window_request = false
 	scope_publish_interaction(view, .Filter_Changed, 0, 0)
 	alicorn.invalidate_root(rt, "scope filter changed")
+}
+
+scope_render_command_palette :: proc(view: ^Scope_View, ui: ^alicorn.UI) {
+	scope_prepare_command_palette(view)
+	descriptors := scope_command_descriptors(view^)
+	alicorn.container_begin(
+		ui,
+		.Container,
+		label="scope-command-palette",
+		style=alicorn.layout_style(grow=1, padding=20, gap=12, clip=true),
+		color=SCOPE_PANEL_BACKGROUND,
+	)
+	alicorn.text(
+		ui,
+		"Command Palette",
+		style=alicorn.layout_style(.Row, height=32),
+		text_style=alicorn.Text_Style{font_weight=alicorn.FONT_WEIGHT_SEMIBOLD},
+	)
+	palette_id := alicorn.text_field(
+		ui,
+		view.ui.command_palette_query,
+		key=alicorn.key_string("scope-command-palette-query"),
+		style=alicorn.layout_style(.Row, height=38),
+		text_style=alicorn.Text_Style{overflow=.Ellipsis},
+	)
+	view.ui.command_palette_node = palette_id
+	alicorn.text(
+		ui,
+		"Type a command · ↑/↓ move · Enter run · Esc close",
+		style=alicorn.layout_style(.Row, height=24),
+	)
+	if view.ui.palette_visible_count == 0 {
+		alicorn.text(ui, "No matching commands", style=alicorn.layout_style(.Row, height=32))
+	} else {
+		for index := 0; index < view.ui.palette_visible_count; index += 1 {
+			command_id := view.ui.palette_visible_commands[index]
+			descriptor := descriptors[0]
+			for candidate in descriptors {
+				if candidate.id == command_id { descriptor = candidate; break }
+			}
+			label := descriptor.label
+			if len(descriptor.shortcut) > 0 { label = fmt.tprintf("%s  ·  %s", descriptor.label, descriptor.shortcut) }
+			selected := index == view.ui.palette_selected_index
+			if alicorn.button(
+				ui,
+				label,
+				key=alicorn.key_pair(u64(command_id), 3),
+				state=alicorn.Button_State{selected=selected},
+				style=alicorn.layout_style(.Row, height=38),
+				text_style=alicorn.Text_Style{overflow=.Ellipsis},
+				content_style=alicorn.button_content_style(horizontal=.Start, vertical=.Center, padding_x=10, padding_y=4),
+			) {
+				scope_publish_command(view, command_id)
+			}
+		}
+	}
+	alicorn.container_end(ui)
 }
 
 scope_event_position :: proc(view: Scope_View, id: u64) -> int {
@@ -403,6 +613,7 @@ scope_render :: proc(view: ^Scope_View, rt: ^alicorn.Runtime) -> alicorn.Node_ID
 	if !should_build { return 0 }
 
 	first_build := view.ui.filter_node == 0
+	filter_id: alicorn.Node_ID
 	selection_changed := false
 	event_window_acknowledged := scope_ack_cached_window(view)
 	track_window_acknowledged := scope_ack_cached_tracks(view)
@@ -442,10 +653,22 @@ scope_render :: proc(view: ^Scope_View, rt: ^alicorn.Runtime) -> alicorn.Node_ID
 		text_style=alicorn.Text_Style{font_weight=alicorn.FONT_WEIGHT_MEDIUM},
 	)
 	if open_trace_clicked {
-		scope_publish_interaction(view, .Open_Trace, 0, 0)
+		scope_publish_command(view, .Open_Trace)
+	}
+	if alicorn.button(
+		&ui,
+		"Commands...",
+		key=alicorn.key_string("scope-command-palette-open"),
+		style=alicorn.layout_style(.Row, width=112, height=30),
+		text_style=alicorn.Text_Style{font_weight=alicorn.FONT_WEIGHT_MEDIUM},
+	) {
+		scope_publish_command(view, .Toggle_Command_Palette)
 	}
 	alicorn.container_end(&ui)
 
+	if view.ui.command_palette_open {
+		scope_render_command_palette(view, &ui)
+	} else {
 	trace_label := view.trace_path
 	if len(trace_label) == 0 { trace_label = "Open a Chrome Trace Event JSON file to begin" }
 	summary := view.trace_summary
@@ -467,7 +690,7 @@ scope_render :: proc(view: ^Scope_View, rt: ^alicorn.Runtime) -> alicorn.Node_ID
 		label="scope-filter-row",
 		style=alicorn.layout_style(.Row, height=34, gap=10, align=.Center),
 	)
-	filter_id := alicorn.text_field(
+	filter_id = alicorn.text_field(
 		&ui,
 		view.filter,
 		key=alicorn.key_string("scope-filter"),
@@ -653,27 +876,15 @@ scope_render :: proc(view: ^Scope_View, rt: ^alicorn.Runtime) -> alicorn.Node_ID
 		}
 	}
 	alicorn.container_begin(&ui, .Container, label="scope-timeline-heading", style=alicorn.layout_style(.Row, height=28, gap=8, align=.Center))
-	if view.ui.has_selected_track && alicorn.button(
+		if view.ui.has_selected_track && alicorn.button(
 		&ui,
 		"← Overview",
 		style=alicorn.layout_style(.Row, width=112, height=24),
 		text_style=alicorn.Text_Style{overflow=.Ellipsis},
-		content_style=alicorn.button_content_style(horizontal=.Start, vertical=.Center, padding_x=8, padding_y=0),
-	) {
-		view.ui.has_selected_track = false
-		view.ui.selected_track_id = 0
-		view.ui.has_selected_event = false
-		view.ui.selected_event_id = 0
-		view.ui.has_selected_event_row = false
-		view.ui.has_pending_navigation_row = false
-		view.timeline_request_pending = false
-		view.timeline_ready = false
-		view.timeline_mode = .None
-		view.timeline_revision += 1
-		if view.timeline_revision == 0 { view.timeline_revision = 1 }
-		scope_publish_interaction(view, .Track_Selected, 0, 0)
-		selection_changed = true
-	}
+			content_style=alicorn.button_content_style(horizontal=.Start, vertical=.Center, padding_x=8, padding_y=0),
+		) {
+			scope_publish_command(view, .Show_Overview)
+		}
 	alicorn.text(&ui, fmt.tprintf("Timeline  ·  %s", track_label), style=alicorn.layout_style(.Row, grow=1), text_style=alicorn.Text_Style{font_weight=alicorn.FONT_WEIGHT_SEMIBOLD, overflow=.Ellipsis})
 	alicorn.text(&ui, mode_label, style=alicorn.layout_style(.Row, height=24), text_style=alicorn.Text_Style{overflow=.Ellipsis})
 	alicorn.container_end(&ui)
@@ -795,13 +1006,46 @@ scope_render :: proc(view: ^Scope_View, rt: ^alicorn.Runtime) -> alicorn.Node_ID
 		style=alicorn.layout_style(grow=1, padding=8, gap=6, clip=true),
 		color=SCOPE_PANEL_BACKGROUND,
 	)
+	alicorn.container_begin(&ui, .Container, label="scope-inspector-heading", style=alicorn.layout_style(.Row, height=30, gap=8, align=.Center))
 	alicorn.text(
 		&ui,
 		"Inspector",
-		style=alicorn.layout_style(.Row, height=28),
+		style=alicorn.layout_style(.Row, grow=1),
 		text_style=alicorn.Text_Style{font_weight=alicorn.FONT_WEIGHT_SEMIBOLD},
 	)
-	if !view.ui.has_selected_event {
+	inspector_toggle_label := "Runtime"
+	if view.ui.show_runtime_inspector { inspector_toggle_label = "Event Details" }
+	if alicorn.button(
+		&ui,
+		inspector_toggle_label,
+		key=alicorn.key_string("scope-runtime-inspector-toggle"),
+		style=alicorn.layout_style(.Row, height=26),
+	) {
+		scope_publish_command(view, .Toggle_Runtime_Inspector)
+	}
+	alicorn.container_end(&ui)
+	if view.ui.show_runtime_inspector {
+		alicorn.text(&ui, "Recent runtime activity", style=alicorn.layout_style(.Row, height=26), text_style=alicorn.Text_Style{font_weight=alicorn.FONT_WEIGHT_MEDIUM})
+		activity_start := max(0, len(view.runtime_activity)-8)
+		for activity in view.runtime_activity[activity_start:] {
+			alicorn.text(&ui, activity.text, style=alicorn.layout_style(.Row, height=22), text_style=alicorn.Text_Style{overflow=.Ellipsis})
+		}
+		alicorn.text(&ui, "Retained runtime snapshot", style=alicorn.layout_style(.Row, height=26))
+		inspection := view.runtime_inspection
+		if len(inspection) > 24000 { inspection = fmt.tprintf("%s\n… inspection truncated for display", inspection[:24000]) }
+		inspection_content_height := max(240, len(inspection)/40*20)
+		alicorn.scroll_region_begin(
+			&ui,
+			key=alicorn.key_string("scope-runtime-inspection-scroll"),
+			content_height=f32(inspection_content_height),
+			line_height=20,
+			style=alicorn.layout_style(grow=1, clip=true),
+			label="scope-runtime-inspection-scroll",
+			axes=.Vertical,
+		)
+		alicorn.text(&ui, inspection, style=alicorn.layout_style(.Row, grow=1), text_style=alicorn.Text_Style{overflow=.Wrap})
+		alicorn.scroll_region_end(&ui)
+	} else if !view.ui.has_selected_event {
 		alicorn.text(&ui, "Select an event to inspect its details", style=alicorn.layout_style(.Row, height=34))
 	} else if !view.selected_event.available || view.selected_event.id != view.ui.selected_event_id {
 		alicorn.text(&ui, "Loading selected event details...", style=alicorn.layout_style(.Row, height=34))
@@ -861,11 +1105,20 @@ scope_render :: proc(view: ^Scope_View, rt: ^alicorn.Runtime) -> alicorn.Node_ID
 
 	alicorn.split_second_end(&ui, outer_split)
 	alicorn.split_end(&ui, outer_split)
+	}
 	alicorn.container_end(&ui) // scope-root
 	alicorn.end_frame(&ui)
 
-	view.ui.filter_node = filter_id
-	if first_build && filter_id != 0 {
+	if !view.ui.command_palette_open { view.ui.filter_node = filter_id }
+	if view.ui.command_palette_focus_pending && view.ui.command_palette_node != 0 {
+		_ = alicorn.focus(rt, view.ui.command_palette_node)
+		view.ui.command_palette_focus_pending = false
+	}
+	if view.ui.focus_restore_pending {
+		if view.ui.focus_before_palette != 0 { _ = alicorn.focus(rt, view.ui.focus_before_palette) }
+		view.ui.focus_restore_pending = false
+	}
+	if first_build && filter_id != 0 && !view.ui.command_palette_open {
 		_ = alicorn.focus(rt, filter_id)
 	}
 	if selection_changed {

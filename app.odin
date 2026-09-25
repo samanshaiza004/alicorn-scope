@@ -10,6 +10,7 @@ import "core:path/filepath"
 import "core:strings"
 import "core:sync"
 import "core:thread"
+import utf8 "core:unicode/utf8"
 import alicorn "alicorn:runtime"
 import frontend "./frontend"
 import host "alicorn:native/sdl_gpu"
@@ -130,6 +131,14 @@ Scope_App :: struct {
 	error: string,
 	dialog_error: string,
 	dialog_error_owned: bool,
+	file_menu_items: [1]host.Application_Menu_Item,
+	view_menu_items: [3]host.Application_Menu_Item,
+	navigate_menu_items: [5]host.Application_Menu_Item,
+	menus: [3]host.Application_Menu,
+	runtime_inspection: string,
+	runtime_activity: [dynamic]frontend.Scope_Runtime_Activity,
+	last_trace_sequence: u64,
+	geometry_selected_event_id: u64,
 }
 
 scope_app_new :: proc(backend: Scope_Backend_API, trace_path: string) -> ^Scope_App {
@@ -139,6 +148,7 @@ scope_app_new :: proc(backend: Scope_Backend_API, trace_path: string) -> ^Scope_
 	app.events = make([dynamic]frontend.Scope_Event_Row, 0, SCOPE_EVENT_WINDOW_ROWS)
 	app.timeline_rows = make([dynamic]frontend.Scope_Timeline_Row, 0, 512)
 	app.arguments = make([dynamic]frontend.Scope_Argument, 0, 32)
+	app.runtime_activity = make([dynamic]frontend.Scope_Runtime_Activity, 0, 64)
 	app.state_bytes = make([]byte, SCOPE_RESOURCE_LIMIT)
 	app.resource_scratch = make([]byte, SCOPE_RESOURCE_LIMIT)
 	app.requested_trace, _ = strings.clone(trace_path)
@@ -189,6 +199,12 @@ scope_app_destroy :: proc(app: ^Scope_App) {
 	if app.dialog_error_owned && len(app.dialog_error) > 0 { delete(app.dialog_error) }
 	if len(app.progress_message) > 0 { delete(app.progress_message) }
 	if len(app.view.trace_summary) > 0 { delete(app.view.trace_summary) }
+	if len(app.view.ui.command_palette_query) > 0 && app.view.ui.command_palette_query_owned { delete(app.view.ui.command_palette_query) }
+	if len(app.runtime_inspection) > 0 { delete(app.runtime_inspection) }
+	for &activity in app.runtime_activity {
+		if len(activity.text) > 0 { delete(activity.text) }
+	}
+	delete(app.runtime_activity)
 	delete(app.state_bytes)
 	delete(app.resource_scratch)
 	free(app)
@@ -690,6 +706,172 @@ scope_open_trace_dialog :: proc(app: ^Scope_App, rt: ^alicorn.Runtime) {
 	}
 }
 
+scope_update_native_menu_state :: proc(app: ^Scope_App) {
+	app.view_menu_items[1].checked = app.view.ui.show_runtime_inspector
+	app.view_menu_items[2].enabled = app.view.ui.has_selected_track
+	app.navigate_menu_items[1].enabled = app.view.load_status == .Ready
+	app.navigate_menu_items[2].enabled = app.view.ui.has_selected_event
+	app.navigate_menu_items[3].enabled = app.view.event_total_count > 0
+	app.navigate_menu_items[4].enabled = app.view.ui.has_selected_event
+}
+
+scope_configure_native_menus :: proc(app: ^Scope_App) {
+	app.file_menu_items = {
+		{kind=.Command, command=host.Application_Command_ID(u32(frontend.Scope_Command_ID.Open_Trace)), label="Open Trace...", enabled=true, shortcut=host.Application_Menu_Shortcut{'O', {.Primary}}},
+	}
+	app.view_menu_items = {
+		{kind=.Command, command=host.Application_Command_ID(u32(frontend.Scope_Command_ID.Toggle_Command_Palette)), label="Command Palette...", enabled=true, shortcut=host.Application_Menu_Shortcut{'P', {.Primary, .Shift}}},
+		{kind=.Command, command=host.Application_Command_ID(u32(frontend.Scope_Command_ID.Toggle_Runtime_Inspector)), label="Runtime Inspector", enabled=true},
+		{kind=.Command, command=host.Application_Command_ID(u32(frontend.Scope_Command_ID.Show_Overview)), label="Show Overview", enabled=false},
+	}
+	app.navigate_menu_items = {
+		{kind=.Command, command=host.Application_Command_ID(u32(frontend.Scope_Command_ID.Fit_Trace)), label="Fit Whole Trace", enabled=false},
+		{kind=.Command, command=host.Application_Command_ID(u32(frontend.Scope_Command_ID.Fit_Selection)), label="Fit Selection", enabled=false},
+		{kind=.Command, command=host.Application_Command_ID(u32(frontend.Scope_Command_ID.Previous_Event)), label="Previous Event", enabled=false},
+		{kind=.Command, command=host.Application_Command_ID(u32(frontend.Scope_Command_ID.Next_Event)), label="Next Event", enabled=false},
+		{kind=.Command, command=host.Application_Command_ID(u32(frontend.Scope_Command_ID.Clear_Selection)), label="Clear Event Selection", enabled=false},
+	}
+	app.menus = {
+		{label="File", items=app.file_menu_items[:]},
+		{label="View", items=app.view_menu_items[:]},
+		{label="Navigate", items=app.navigate_menu_items[:]},
+	}
+	scope_update_native_menu_state(app)
+}
+
+scope_runtime_record :: proc(app: ^Scope_App, message: string) {
+	copy, err := strings.clone(message, allocator=context.allocator)
+	if err != nil { return }
+	if len(app.runtime_activity) < 64 {
+		append(&app.runtime_activity, frontend.Scope_Runtime_Activity{text=copy})
+		return
+	}
+	if len(app.runtime_activity[0].text) > 0 { delete(app.runtime_activity[0].text) }
+	for index := 1; index < len(app.runtime_activity); index += 1 {
+		app.runtime_activity[index-1] = app.runtime_activity[index]
+	}
+	app.runtime_activity[len(app.runtime_activity)-1] = frontend.Scope_Runtime_Activity{text=copy}
+}
+
+scope_utf8_prefix_bytes :: proc(value: string, maximum: int) -> int {
+	limit := min(len(value), maximum)
+	index := 0
+	for index < limit {
+		_, width := utf8.decode_rune_in_string(value[index:])
+		if width <= 0 || index+width > limit { break }
+		index += width
+	}
+	return index
+}
+
+scope_capture_runtime_inspection :: proc(app: ^Scope_App, rt: ^alicorn.Runtime) {
+	if !app.view.ui.show_runtime_inspector { return }
+	events := alicorn.trace_snapshot(rt)
+	defer delete(events)
+	for event in events {
+		if event.sequence <= app.last_trace_sequence { continue }
+		scope_runtime_record(app, fmt.tprintf("%06d  %v  node=%d  %s", event.sequence, event.kind, event.node, event.reason))
+		app.last_trace_sequence = event.sequence
+	}
+	inspection := alicorn.inspect(rt)
+	if len(inspection) > 24000 {
+		bounded_length := scope_utf8_prefix_bytes(inspection, 24000)
+		bounded, err := strings.clone(inspection[:bounded_length], allocator=context.allocator)
+		delete(inspection)
+		if err == nil {
+			if len(app.runtime_inspection) > 0 { delete(app.runtime_inspection) }
+			app.runtime_inspection = bounded
+		}
+	} else {
+		if len(app.runtime_inspection) > 0 { delete(app.runtime_inspection) }
+		app.runtime_inspection = inspection
+	}
+}
+
+scope_dispatch_command :: proc(app: ^Scope_App, rt: ^alicorn.Runtime, command: frontend.Scope_Command_ID) -> bool {
+	if command == .None || !frontend.scope_command_enabled(app.view, command) { return false }
+	scope_runtime_record(app, fmt.tprintf("Command · %s", frontend.scope_command_label(command)))
+	if app.view.ui.command_palette_open && command != .Toggle_Command_Palette {
+		app.view.ui.command_palette_open = false
+		app.view.ui.focus_restore_pending = true
+	}
+	changed := false
+	#partial switch command {
+	case .Open_Trace:
+		scope_open_trace_dialog(app, rt)
+		changed = true
+	case .Show_Overview:
+		changed = frontend.scope_show_overview(&app.view)
+		if changed {
+			_ = app.backend.select_event(app.state.trace_generation, 0)
+			_ = scope_request_timeline(app)
+		}
+	case .Fit_Trace:
+		changed = scope_timeline_set_range(app, app.view.trace_start_us, scope_timeline_effective_end(app.view))
+		if changed {
+			scope_refresh_timeline_geometry(app, rt)
+			_ = scope_request_timeline(app)
+		}
+		changed = true
+	case .Fit_Selection:
+		if !app.view.ui.has_selected_event { return false }
+		selected_start := app.view.selected_event.timestamp_us
+		selected_duration := app.view.selected_event.duration_us
+		if !app.view.selected_event.available || app.view.selected_event.id != app.view.ui.selected_event_id {
+			for row in app.view.timeline_rows {
+				if row.event_id == app.view.ui.selected_event_id && app.view.timeline_mode == .Raw {
+					selected_start, selected_duration = row.timestamp_us, row.duration_us
+					break
+				}
+			}
+		}
+		trace_span := scope_timeline_effective_end(app.view)-app.view.trace_start_us
+		selection_span := max(selected_duration, trace_span/100_000)
+		if selection_span <= 0 { selection_span = max(trace_span/1000, 0.000001) }
+		if scope_timeline_set_range(app, selected_start-selection_span*2, selected_start+max(selected_duration, selection_span)*2) {
+			scope_refresh_timeline_geometry(app, rt)
+			_ = scope_request_timeline(app)
+		}
+		changed = true
+	case .Previous_Event:
+		changed = frontend.scope_on_navigation_key(&app.view, rt, .Up)
+	case .Next_Event:
+		changed = frontend.scope_on_navigation_key(&app.view, rt, .Down)
+	case .Toggle_Runtime_Inspector:
+		app.view.ui.show_runtime_inspector = !app.view.ui.show_runtime_inspector
+		changed = true
+	case .Toggle_Command_Palette:
+		if app.view.ui.command_palette_open {
+			app.view.ui.command_palette_open = false
+			app.view.ui.focus_restore_pending = true
+		} else {
+			app.view.ui.focus_before_palette = rt.focused
+			if app.view.ui.command_palette_query_owned && len(app.view.ui.command_palette_query) > 0 { delete(app.view.ui.command_palette_query) }
+			app.view.ui.command_palette_query = ""
+			app.view.ui.command_palette_query_owned = false
+			app.view.ui.palette_selected_index = 0
+			app.view.ui.command_palette_open = true
+			app.view.ui.command_palette_focus_pending = true
+		}
+		changed = true
+	case .Clear_Selection:
+		app.view.ui.has_selected_event = false
+		app.view.ui.selected_event_id = 0
+		app.view.ui.has_selected_event_row = false
+		app.view.ui.has_pending_navigation_row = false
+		_ = app.backend.select_event(app.state.trace_generation, 0)
+		changed = true
+	}
+	scope_update_native_menu_state(app)
+	if changed { alicorn.invalidate_root(rt, "Scope semantic command dispatched") }
+	return true
+}
+
+scope_on_menu_command :: proc(state: rawptr, rt: ^alicorn.Runtime, command: host.Application_Command_ID) {
+	app := cast(^Scope_App)state
+	_ = scope_dispatch_command(app, rt, frontend.Scope_Command_ID(u32(command)))
+}
+
 scope_report_dialog_error :: proc(app: ^Scope_App, rt: ^alicorn.Runtime, message: string) {
 	if app.dialog_error_owned && len(app.dialog_error) > 0 {
 		delete(app.dialog_error)
@@ -716,8 +898,8 @@ scope_consume_interaction :: proc(app: ^Scope_App, rt: ^alicorn.Runtime) {
 	if interaction.sequence == 0 || interaction.sequence == app.last_interaction_sequence { return }
 	app.last_interaction_sequence = interaction.sequence
 	#partial switch interaction.kind {
-	case .Open_Trace:
-		scope_open_trace_dialog(app, rt)
+	case .Command_Invoked:
+		_ = scope_dispatch_command(app, rt, interaction.command_id)
 	case .Filter_Changed:
 		filter_ptr := strings.unsafe_string_to_cstring(app.view.filter)
 		_ = app.backend.set_filter(filter_ptr, uintptr(len(app.view.filter)))
@@ -747,8 +929,17 @@ scope_consume_interaction :: proc(app: ^Scope_App, rt: ^alicorn.Runtime) {
 scope_build :: proc(state: rawptr, rt: ^alicorn.Runtime, logical_width, logical_height: int, dpi_scale: f32) -> alicorn.Node_ID {
 	app := cast(^Scope_App)state
 	app.build_count += 1
+	app.view.runtime_activity = app.runtime_activity[:]
+	scope_capture_runtime_inspection(app, rt)
+	app.view.runtime_activity = app.runtime_activity[:]
+	scope_update_native_menu_state(app)
 	root := frontend.scope_render(&app.view, rt)
 	scope_consume_interaction(app, rt)
+	scope_update_native_menu_state(app)
+	if app.geometry_selected_event_id != app.view.ui.selected_event_id {
+		app.geometry_selected_event_id = app.view.ui.selected_event_id
+		scope_timeline_bump_revision(&app.view)
+	}
 	scope_refresh_timeline_geometry(app, rt)
 	return root
 }
@@ -1016,7 +1207,6 @@ scope_on_pointer :: proc(state: rawptr, rt: ^alicorn.Runtime, event: alicorn.Poi
 					view.ui.has_selected_event_row = false
 					view.ui.has_pending_navigation_row = false
 					frontend.scope_publish_interaction(view, .Event_Selected, 0, event_id)
-					scope_timeline_bump_revision(view)
 					alicorn.invalidate_root(rt, "scope timeline selected event")
 				}
 			}
@@ -1054,38 +1244,46 @@ scope_on_text_change :: proc(state: rawptr, rt: ^alicorn.Runtime, change: alicor
 
 scope_on_key :: proc(state: rawptr, rt: ^alicorn.Runtime, key: host.Application_Key) -> bool {
 	app := cast(^Scope_App)state
-	if app.view.ui.filter_node != 0 && rt.focused == app.view.ui.filter_node { return false }
+	if app.view.ui.command_palette_open {
+		#partial switch key {
+		case .Escape:
+			return scope_dispatch_command(app, rt, .Toggle_Command_Palette)
+		case .Return:
+			frontend.scope_prepare_command_palette(&app.view)
+			if app.view.ui.palette_visible_count == 0 { return true }
+			command := app.view.ui.palette_visible_commands[app.view.ui.palette_selected_index]
+			return scope_dispatch_command(app, rt, command)
+		case .Up:
+			frontend.scope_prepare_command_palette(&app.view)
+			if app.view.ui.palette_visible_count > 0 { app.view.ui.palette_selected_index = max(0, app.view.ui.palette_selected_index-1) }
+			alicorn.invalidate_root(rt, "Scope command palette selection moved")
+			return true
+		case .Down:
+			frontend.scope_prepare_command_palette(&app.view)
+			if app.view.ui.palette_visible_count > 0 { app.view.ui.palette_selected_index = min(app.view.ui.palette_visible_count-1, app.view.ui.palette_selected_index+1) }
+			alicorn.invalidate_root(rt, "Scope command palette selection moved")
+			return true
+		}
+	}
+	if app.view.ui.filter_node != 0 && rt.focused == app.view.ui.filter_node {
+		if key == .Open_Repository { return scope_dispatch_command(app, rt, .Open_Trace) }
+		if key == .Open_Command_Palette { return scope_dispatch_command(app, rt, .Toggle_Command_Palette) }
+		if key == .Escape && app.view.ui.show_runtime_inspector {
+			return scope_dispatch_command(app, rt, .Toggle_Runtime_Inspector)
+		}
+		return false
+	}
 	#partial switch key {
-	case .Up:        return frontend.scope_on_navigation_key(&app.view, rt, .Up)
-	case .Down:      return frontend.scope_on_navigation_key(&app.view, rt, .Down)
+	case .Up:        return scope_dispatch_command(app, rt, .Previous_Event)
+	case .Down:      return scope_dispatch_command(app, rt, .Next_Event)
 	case .Page_Up:   return frontend.scope_on_navigation_key(&app.view, rt, .Page_Up)
 	case .Page_Down: return frontend.scope_on_navigation_key(&app.view, rt, .Page_Down)
-	case .Home:
-		if scope_timeline_set_range(app, app.view.trace_start_us, scope_timeline_effective_end(app.view)) {
-			scope_refresh_timeline_geometry(app, rt)
-			_ = scope_request_timeline(app)
-			return true
-		}
-	case .Fit_Selection:
-		if !app.view.ui.has_selected_event { return false }
-		selected_start := app.view.selected_event.timestamp_us
-		selected_duration := app.view.selected_event.duration_us
-		if !app.view.selected_event.available || app.view.selected_event.id != app.view.ui.selected_event_id {
-			for row in app.view.timeline_rows {
-				if row.event_id == app.view.ui.selected_event_id && app.view.timeline_mode == .Raw {
-					selected_start, selected_duration = row.timestamp_us, row.duration_us
-					break
-				}
-			}
-		}
-		trace_span := scope_timeline_effective_end(app.view)-app.view.trace_start_us
-		selection_span := max(selected_duration, trace_span/100_000)
-		if selection_span <= 0 { selection_span = max(trace_span/1000, 0.000001) }
-		if scope_timeline_set_range(app, selected_start-selection_span*2, selected_start+max(selected_duration, selection_span)*2) {
-			scope_refresh_timeline_geometry(app, rt)
-			_ = scope_request_timeline(app)
-			return true
-		}
+	case .Home:      return scope_dispatch_command(app, rt, .Fit_Trace)
+	case .Fit_Selection: return scope_dispatch_command(app, rt, .Fit_Selection)
+	case .Open_Repository: return scope_dispatch_command(app, rt, .Open_Trace)
+	case .Open_Command_Palette: return scope_dispatch_command(app, rt, .Toggle_Command_Palette)
+	case .Escape:
+		if app.view.ui.show_runtime_inspector { return scope_dispatch_command(app, rt, .Toggle_Runtime_Inspector) }
 	}
 	return false
 }
@@ -1257,6 +1455,7 @@ scope_app_startup_sync :: proc(app: ^Scope_App) {
 }
 
 scope_app_run :: proc(app: ^Scope_App, smoke: bool) {
+	scope_configure_native_menus(app)
 	application := host.Application{
 		state=rawptr(app),
 		title="Alicorn Scope",
@@ -1273,6 +1472,10 @@ scope_app_run :: proc(app: ^Scope_App, smoke: bool) {
 		on_dialog=scope_on_dialog,
 		on_wake=scope_on_wake,
 		on_stop=scope_on_stop,
+	}
+	when ODIN_OS == .Windows || ODIN_OS == .Darwin {
+		application.menus = app.menus[:]
+		application.on_menu_command = scope_on_menu_command
 	}
 	host.Run(application, smoke)
 }
