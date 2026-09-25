@@ -1266,11 +1266,13 @@ scope_on_key :: proc(state: rawptr, rt: ^alicorn.Runtime, key: host.Application_
 		case .Up:
 			frontend.scope_prepare_command_palette(&app.view)
 			if app.view.ui.palette_visible_count > 0 { app.view.ui.palette_selected_index = max(0, app.view.ui.palette_selected_index-1) }
+			_ = alicorn.virtual_list_ensure_visible(rt, app.view.ui.command_palette_results_scroll_node, app.view.ui.palette_selected_index, "Scope command palette selection visibility")
 			alicorn.invalidate_root(rt, "Scope command palette selection moved")
 			return true
 		case .Down:
 			frontend.scope_prepare_command_palette(&app.view)
 			if app.view.ui.palette_visible_count > 0 { app.view.ui.palette_selected_index = min(app.view.ui.palette_visible_count-1, app.view.ui.palette_selected_index+1) }
+			_ = alicorn.virtual_list_ensure_visible(rt, app.view.ui.command_palette_results_scroll_node, app.view.ui.palette_selected_index, "Scope command palette selection visibility")
 			alicorn.invalidate_root(rt, "Scope command palette selection moved")
 			return true
 		}
@@ -1484,7 +1486,7 @@ scope_app_run :: proc(app: ^Scope_App, smoke: bool) {
 		on_stop=scope_on_stop,
 	}
 	when ODIN_OS == .Windows {
-		application.window_decorations = .Integrated_Title_Bar
+		application.window_decorations = .System
 	}
 	when ODIN_OS == .Windows || ODIN_OS == .Darwin {
 		application.menus = app.menus[:]

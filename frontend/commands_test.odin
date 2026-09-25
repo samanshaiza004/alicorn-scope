@@ -28,6 +28,15 @@ test_scope_command_palette_fuzzy_filter_is_stable :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_scope_command_palette_panel_grows_then_caps_at_eight_rows :: proc(t: ^testing.T) {
+	base_height := scope_command_palette_panel_height(0)
+	testing.expect(t, base_height == 104, "an empty result set should leave room for the input and one empty-state row")
+	testing.expect(t, scope_command_palette_panel_height(2) == 138, "the palette panel should grow to fit each additional result")
+	testing.expect(t, scope_command_palette_panel_height(8) == 342, "eight visible results should fit in the capped panel")
+	testing.expect(t, scope_command_palette_panel_height(9) == 342, "additional results should scroll without growing the panel")
+}
+
+@(test)
 test_scope_command_availability_tracks_application_state :: proc(t: ^testing.T) {
 	view := Scope_View{load_status=.Ready}
 	testing.expect(t, scope_command_enabled(view, .Fit_Trace), "fit trace requires a loaded trace")

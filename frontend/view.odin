@@ -13,6 +13,11 @@ SCOPE_TRACK_ROW_HEIGHT :: f32(34)
 SCOPE_EVENT_ROW_HEIGHT :: f32(46)
 SCOPE_ARGUMENT_ROW_HEIGHT :: f32(40)
 SCOPE_EVENT_WINDOW_SIZE :: int(512)
+SCOPE_COMMAND_PALETTE_ROW_HEIGHT :: f32(34)
+SCOPE_COMMAND_PALETTE_MAX_ROWS :: int(8)
+SCOPE_COMMAND_PALETTE_INPUT_HEIGHT :: f32(40)
+SCOPE_COMMAND_PALETTE_PADDING :: f32(12)
+SCOPE_COMMAND_PALETTE_GAP :: f32(6)
 
 Scope_Trace_Load_Status :: enum {
 	Empty,
@@ -138,6 +143,7 @@ Scope_UI_State :: struct {
 	command_palette_node: alicorn.Node_ID,
 	command_palette_overlay_node: alicorn.Node_ID,
 	command_palette_panel_node: alicorn.Node_ID,
+	command_palette_results_scroll_node: alicorn.Node_ID,
 	tracks_scroll_node: alicorn.Node_ID,
 	events_scroll_node: alicorn.Node_ID,
 	arguments_scroll_node: alicorn.Node_ID,
@@ -466,9 +472,17 @@ scope_on_text_change :: proc(view: ^Scope_View, rt: ^alicorn.Runtime, change: al
 	alicorn.invalidate_root(rt, "scope filter changed")
 }
 
+scope_command_palette_panel_height :: proc(result_count: int) -> f32 {
+	visible_rows := min(max(result_count, 1), SCOPE_COMMAND_PALETTE_MAX_ROWS)
+	return 2*SCOPE_COMMAND_PALETTE_PADDING + SCOPE_COMMAND_PALETTE_INPUT_HEIGHT + SCOPE_COMMAND_PALETTE_GAP + f32(visible_rows)*SCOPE_COMMAND_PALETTE_ROW_HEIGHT
+}
+
 scope_render_command_palette :: proc(view: ^Scope_View, ui: ^alicorn.UI) {
 	scope_prepare_command_palette(view)
 	descriptors := scope_command_descriptors(view^)
+	visible_rows := min(max(view.ui.palette_visible_count, 1), SCOPE_COMMAND_PALETTE_MAX_ROWS)
+	results_height := f32(visible_rows) * SCOPE_COMMAND_PALETTE_ROW_HEIGHT
+	panel_height := scope_command_palette_panel_height(view.ui.palette_visible_count)
 	view.ui.command_palette_overlay_node = alicorn.modal_overlay_begin(
 		ui,
 		alicorn.key_string("scope-command-palette-overlay"),
@@ -478,21 +492,21 @@ scope_render_command_palette :: proc(view: ^Scope_View, ui: ^alicorn.UI) {
 		ui,
 		.Container,
 		label="scope-command-palette",
-		style=alicorn.layout_style(width=680, max_width=720, padding=12, gap=6, clip=true),
+		style=alicorn.layout_style(height=panel_height, max_width=680, padding=SCOPE_COMMAND_PALETTE_PADDING, gap=SCOPE_COMMAND_PALETTE_GAP, clip=true),
 		color=SCOPE_PANEL_BACKGROUND,
 	)
 	alicorn.container_begin(
 		ui,
 		.Container,
 		label="scope-command-palette-input-row",
-		style=alicorn.layout_style(.Row, height=40, gap=8, align=.Center),
+		style=alicorn.layout_style(.Row, height=SCOPE_COMMAND_PALETTE_INPUT_HEIGHT, gap=8, align=.Center),
 	)
 	alicorn.text(ui, ">", style=alicorn.layout_style(.Row, width=16, height=36), text_style=alicorn.Text_Style{font_weight=alicorn.FONT_WEIGHT_SEMIBOLD})
 	palette_id := alicorn.text_field(
 		ui,
 		view.ui.command_palette_query,
 		key=alicorn.key_string("scope-command-palette-query"),
-		style=alicorn.layout_style(.Row, height=40, grow=1),
+		style=alicorn.layout_style(.Row, height=SCOPE_COMMAND_PALETTE_INPUT_HEIGHT, grow=1),
 		text_style=alicorn.Text_Style{overflow=.Ellipsis},
 	)
 	view.ui.command_palette_node = palette_id
@@ -500,7 +514,16 @@ scope_render_command_palette :: proc(view: ^Scope_View, ui: ^alicorn.UI) {
 	if view.ui.palette_visible_count == 0 {
 		alicorn.text(ui, "No matching commands", style=alicorn.layout_style(.Row, height=34, padding=8))
 	} else {
-		for index := 0; index < view.ui.palette_visible_count; index += 1 {
+		results := alicorn.virtual_list_begin(
+			ui,
+			view.ui.palette_visible_count,
+			SCOPE_COMMAND_PALETTE_ROW_HEIGHT,
+			key=alicorn.key_string("scope-command-palette-results"),
+			style=alicorn.layout_style(height=results_height, clip=true),
+			label="scope-command-palette-results",
+		)
+		view.ui.command_palette_results_scroll_node = results.scroll.id
+		for index := results.first; index < results.last; index += 1 {
 			command_id := view.ui.palette_visible_commands[index]
 			descriptor := descriptors[0]
 			for candidate in descriptors {
@@ -514,13 +537,14 @@ scope_render_command_palette :: proc(view: ^Scope_View, ui: ^alicorn.UI) {
 				label,
 				key=alicorn.key_pair(u64(command_id), 3),
 				state=alicorn.Button_State{selected=selected, quiet=!selected},
-				style=alicorn.layout_style(.Row, height=34),
+				style=alicorn.layout_style(.Row, height=SCOPE_COMMAND_PALETTE_ROW_HEIGHT),
 				text_style=alicorn.Text_Style{overflow=.Ellipsis},
 				content_style=alicorn.button_content_style(horizontal=.Start, vertical=.Center, padding_x=10, padding_y=4),
 			) {
 				scope_publish_command(view, command_id)
 			}
 		}
+		alicorn.virtual_list_end(ui, results)
 	}
 	alicorn.container_end(ui)
 	alicorn.modal_overlay_end(ui)
