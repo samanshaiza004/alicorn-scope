@@ -6,11 +6,6 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-# PowerShell 7.3+ can promote a native program's non-zero exit code to a
-# terminating error. Git probes below intentionally use non-zero codes (for
-# example, cat-file when a pinned commit has not been fetched yet), so keep
-# exit-code handling explicit throughout this resolver.
-$PSNativeCommandUseErrorActionPreference = $false
 $ScopeRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $LockPath = Join-Path $ScopeRoot 'dependencies.lock.json'
 $Lock = Get-Content -Raw -LiteralPath $LockPath | ConvertFrom-Json
@@ -23,6 +18,43 @@ if ($DevDeps -and -not $HasOverride) {
     throw '-DevDeps only applies with -AlicornRoot and/or -CaliberRoot (or their environment variables).'
 }
 
+function Invoke-ScopeGitRaw {
+    param(
+        [string]$Path,
+        [Parameter(Mandatory)][string[]]$GitArguments
+    )
+
+    $previousEap = $ErrorActionPreference
+    $nativePreference = Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue
+    if ($nativePreference) { $previousNativePreference = $nativePreference.Value }
+
+    try {
+        # Windows PowerShell 5.1 can promote redirected native stderr to a
+        # NativeCommandError when ErrorActionPreference is Stop. PowerShell 7
+        # can also promote non-zero native exit codes. Git failures are
+        # expected in probes such as cat-file, so capture them as data here.
+        $ErrorActionPreference = 'Continue'
+        if ($nativePreference) { $PSNativeCommandUseErrorActionPreference = $false }
+
+        if ($Path) {
+            $output = & git -C $Path @GitArguments 2>&1
+        } else {
+            $output = & git @GitArguments 2>&1
+        }
+        $exitCode = $LASTEXITCODE
+        $details = ($output | ForEach-Object { "$_" }) -join [Environment]::NewLine
+
+        return [pscustomobject]@{
+            ExitCode = $exitCode
+            Output   = $details.Trim()
+        }
+    }
+    finally {
+        $ErrorActionPreference = $previousEap
+        if ($nativePreference) { $PSNativeCommandUseErrorActionPreference = $previousNativePreference }
+    }
+}
+
 function Invoke-ScopeGit {
     param(
         [Parameter(Mandatory)][string]$Path,
@@ -30,13 +62,12 @@ function Invoke-ScopeGit {
         [Parameter(Mandatory)][string]$Purpose
     )
 
-    $output = & git -C $Path @GitArguments 2>&1
-    $exitCode = $LASTEXITCODE
+    $result = Invoke-ScopeGitRaw -Path $Path -GitArguments $GitArguments
+    $exitCode = $result.ExitCode
     if ($exitCode -ne 0) {
-        $details = ($output | ForEach-Object { "$_" }) -join [Environment]::NewLine
-        throw "Git failed while $Purpose in '$Path'.`n$details"
+        throw "Git failed while $Purpose in '$Path'.`n$($result.Output)"
     }
-    return (($output | ForEach-Object { "$_" }) -join [Environment]::NewLine).Trim()
+    return $result.Output
 }
 
 function Get-ScopeGitRoot {
@@ -104,11 +135,9 @@ function Resolve-ScopeManagedDependency {
 
     if (-not (Test-Path -LiteralPath $ManagedPath)) {
         Write-Host "  ${Name}: cloning into $ManagedPath"
-        $cloneOutput = & git clone --quiet $Repository $ManagedPath 2>&1
-        $cloneExit = $LASTEXITCODE
-        if ($cloneExit -ne 0) {
-            $details = ($cloneOutput | ForEach-Object { "$_" }) -join [Environment]::NewLine
-            throw "$Name clone failed.`n$details"
+        $clone = Invoke-ScopeGitRaw -GitArguments @('clone', '--quiet', $Repository, $ManagedPath)
+        if ($clone.ExitCode -ne 0) {
+            throw "$Name clone failed.`n$($clone.Output)"
         }
     }
 
@@ -142,29 +171,26 @@ Scope leaves edited dependencies untouched. Commit/stash your work or remove thi
     if ($actual -ne $Revision) {
         Write-Host "  ${Name}: resolving pinned revision $($Revision.Substring(0, 7))"
         $objectSpec = "$Revision^{commit}"
-        & git -C $root cat-file -e $objectSpec 2>$null
-        $hasCommit = $LASTEXITCODE -eq 0
+        $probe = Invoke-ScopeGitRaw -Path $root -GitArguments @('cat-file', '-e', $objectSpec)
+        $hasCommit = $probe.ExitCode -eq 0
         if (-not $hasCommit) {
-            $fetchOutput = & git -C $root fetch --quiet origin 2>&1
-            if ($LASTEXITCODE -ne 0) {
-                $details = ($fetchOutput | ForEach-Object { "$_" }) -join [Environment]::NewLine
-                throw "$Name fetch failed.`n$details"
+            $fetch = Invoke-ScopeGitRaw -Path $root -GitArguments @('fetch', '--quiet', 'origin')
+            if ($fetch.ExitCode -ne 0) {
+                throw "$Name fetch failed.`n$($fetch.Output)"
             }
-            & git -C $root cat-file -e $objectSpec 2>$null
-            $hasCommit = $LASTEXITCODE -eq 0
+            $probe = Invoke-ScopeGitRaw -Path $root -GitArguments @('cat-file', '-e', $objectSpec)
+            $hasCommit = $probe.ExitCode -eq 0
         }
         if (-not $hasCommit) {
-            $fetchOutput = & git -C $root fetch --quiet origin $Revision 2>&1
-            if ($LASTEXITCODE -ne 0) {
-                $details = ($fetchOutput | ForEach-Object { "$_" }) -join [Environment]::NewLine
-                throw "$Name could not fetch locked commit $Revision.`n$details"
+            $fetch = Invoke-ScopeGitRaw -Path $root -GitArguments @('fetch', '--quiet', 'origin', $Revision)
+            if ($fetch.ExitCode -ne 0) {
+                throw "$Name could not fetch locked commit $Revision.`n$($fetch.Output)"
             }
         }
 
-        $checkoutOutput = & git -C $root checkout --quiet --detach $Revision 2>&1
-        if ($LASTEXITCODE -ne 0) {
-            $details = ($checkoutOutput | ForEach-Object { "$_" }) -join [Environment]::NewLine
-            throw "$Name could not check out locked commit $Revision.`n$details"
+        $checkout = Invoke-ScopeGitRaw -Path $root -GitArguments @('checkout', '--quiet', '--detach', $Revision)
+        if ($checkout.ExitCode -ne 0) {
+            throw "$Name could not check out locked commit $Revision.`n$($checkout.Output)"
         }
     }
 
