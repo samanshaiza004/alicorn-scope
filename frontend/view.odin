@@ -90,9 +90,10 @@ Scope_Command_ID :: enum u32 {
 
 Scope_Command_Descriptor :: struct {
 	id: Scope_Command_ID,
+	name: string,
 	label: string,
 	shortcut: string,
-	enabled: bool,
+	state: alicorn.Action_State,
 }
 
 Scope_Runtime_Activity :: struct {
@@ -243,16 +244,24 @@ scope_load_status_text :: proc(view: Scope_View) -> string {
 scope_command_descriptors :: proc(view: Scope_View) -> [9]Scope_Command_Descriptor {
 	ready := view.load_status == .Ready
 	return {
-		{id=.Open_Trace, label="Open Trace...", shortcut="Ctrl/Cmd+O", enabled=true},
-		{id=.Show_Overview, label="Show Overview", shortcut="", enabled=view.ui.has_selected_track},
-		{id=.Fit_Trace, label="Fit Whole Trace", shortcut="Home", enabled=ready},
-		{id=.Fit_Selection, label="Fit Selection", shortcut="F", enabled=view.ui.has_selected_event},
-		{id=.Previous_Event, label="Previous Event", shortcut="", enabled=view.event_total_count > 0},
-		{id=.Next_Event, label="Next Event", shortcut="", enabled=view.event_total_count > 0},
-		{id=.Toggle_Runtime_Inspector, label="Toggle Runtime Inspector", shortcut="", enabled=true},
-		{id=.Toggle_Command_Palette, label="Command Palette", shortcut="Ctrl/Cmd+Shift+P", enabled=true},
-		{id=.Clear_Selection, label="Clear Event Selection", shortcut="", enabled=view.ui.has_selected_event},
+		{id=.Open_Trace, name="scope.open_trace", label="Open Trace...", shortcut="Ctrl/Cmd+O", state=alicorn.Action_State{enabled=true}},
+		{id=.Show_Overview, name="scope.show_overview", label="Show Overview", shortcut="", state=alicorn.Action_State{enabled=view.ui.has_selected_track}},
+		{id=.Fit_Trace, name="scope.fit_whole_trace", label="Fit Whole Trace", shortcut="Home", state=alicorn.Action_State{enabled=ready}},
+		{id=.Fit_Selection, name="scope.fit_selection", label="Fit Selection", shortcut="F", state=alicorn.Action_State{enabled=view.ui.has_selected_event}},
+		{id=.Previous_Event, name="scope.previous_event", label="Previous Event", shortcut="", state=alicorn.Action_State{enabled=view.event_total_count > 0}},
+		{id=.Next_Event, name="scope.next_event", label="Next Event", shortcut="", state=alicorn.Action_State{enabled=view.event_total_count > 0}},
+		{id=.Toggle_Runtime_Inspector, name="scope.toggle_runtime_inspector", label="Runtime Inspector", shortcut="", state=alicorn.Action_State{enabled=true, checked=view.ui.show_runtime_inspector}},
+		{id=.Toggle_Command_Palette, name="scope.command_palette", label="Command Palette...", shortcut="Ctrl/Cmd+Shift+P", state=alicorn.Action_State{enabled=true}},
+		{id=.Clear_Selection, name="scope.clear_event_selection", label="Clear Event Selection", shortcut="", state=alicorn.Action_State{enabled=view.ui.has_selected_event}},
 	}
+}
+
+scope_action_id :: proc(command: Scope_Command_ID) -> alicorn.Action_ID {
+	return alicorn.Action_ID(u32(command))
+}
+
+scope_command_from_action_id :: proc(action: alicorn.Action_ID) -> Scope_Command_ID {
+	return Scope_Command_ID(u32(action))
 }
 
 scope_command_label :: proc(id: Scope_Command_ID) -> string {
@@ -262,11 +271,32 @@ scope_command_label :: proc(id: Scope_Command_ID) -> string {
 	return "Unknown command"
 }
 
+scope_command_name :: proc(id: Scope_Command_ID) -> string {
+	for descriptor in scope_command_descriptors(Scope_View{}) {
+		if descriptor.id == id { return descriptor.name }
+	}
+	return "scope.unknown"
+}
+
 scope_command_enabled :: proc(view: Scope_View, id: Scope_Command_ID) -> bool {
 	for descriptor in scope_command_descriptors(view) {
-		if descriptor.id == id { return descriptor.enabled }
+		if descriptor.id == id { return descriptor.state.enabled }
 	}
 	return false
+}
+
+scope_command_checked :: proc(view: Scope_View, id: Scope_Command_ID) -> bool {
+	for descriptor in scope_command_descriptors(view) {
+		if descriptor.id == id { return descriptor.state.checked }
+	}
+	return false
+}
+
+scope_command_state :: proc(view: Scope_View, id: Scope_Command_ID) -> alicorn.Action_State {
+	for descriptor in scope_command_descriptors(view) {
+		if descriptor.id == id { return descriptor.state }
+	}
+	return {}
 }
 
 scope_fold_ascii :: proc(value: u8) -> u8 {
@@ -297,7 +327,7 @@ scope_prepare_command_palette :: proc(view: ^Scope_View) {
 	view.ui.palette_visible_count = 0
 	descriptors := scope_command_descriptors(view^)
 	for descriptor in descriptors {
-		if !descriptor.enabled { continue }
+		if !descriptor.state.enabled { continue }
 		score := scope_command_match_score(view.ui.command_palette_query, descriptor.label)
 		if score < 0 { continue }
 		insert_at := view.ui.palette_visible_count

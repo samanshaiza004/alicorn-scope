@@ -45,4 +45,13 @@ test_scope_command_availability_tracks_application_state :: proc(t: ^testing.T) 
 	view.ui.has_selected_event = true
 	testing.expect(t, scope_command_enabled(view, .Clear_Selection), "clear selection is enabled when an event is selected")
 	testing.expect(t, u32(Scope_Command_ID.Open_Trace) == 1 && u32(Scope_Command_ID.Clear_Selection) == 9, "public command IDs stay stable for native menu transport")
+	fit := scope_command_descriptors(view)[3]
+	testing.expect(t, fit.id == .Fit_Selection && fit.name == "scope.fit_selection" && fit.label == "Fit Selection",
+		"Scope should publish stable machine identity separately from its readable action label")
+	fit_action := scope_action_id(fit.id)
+	testing.expect(t, u32(fit_action) == u32(fit.id) && scope_command_from_action_id(fit_action) == fit.id,
+		"UI, shortcut, palette, and native menu projections should round-trip through one Alicorn action identity")
+	view.ui.show_runtime_inspector = true
+	testing.expect(t, scope_command_checked(view, .Toggle_Runtime_Inspector),
+		"checked action state should follow explicit Scope UI state")
 }
