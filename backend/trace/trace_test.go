@@ -202,8 +202,8 @@ func TestTimelineWindowUsesTrackIntervalIndexAndTraceBounds(t *testing.T) {
 		t.Fatal(err)
 	}
 	start, end, ok := model.TraceBounds()
-	if !ok || start != 0 || end != 21 {
-		t.Fatalf("trace bounds=(%v,%v,%v), want (0,21,true)", start, end, ok)
+	if !ok || start != 0 || end != math.Nextafter(21, math.Inf(1)) {
+		t.Fatalf("trace bounds=(%v,%v,%v), want (0,%v,true)", start, end, math.Nextafter(21, math.Inf(1)), ok)
 	}
 	tracks := model.TrackWindow(0, 512).Rows
 	var trackID uint64
@@ -246,6 +246,30 @@ func TestTimelineWindowUsesTrackIntervalIndexAndTraceBounds(t *testing.T) {
 	}
 	if got := query.TimelineWindow(trackID, math.NaN(), 15, 8, 8, 9); len(got.Rows) != 0 {
 		t.Fatal("invalid time range should produce an empty bounded window")
+	}
+}
+
+func TestTraceBoundsIncludeInstantAtMaximumTimestamp(t *testing.T) {
+	input := `[
+		{"ph":"X","name":"complete","ts":1,"dur":2,"pid":1,"tid":1},
+		{"ph":"I","name":"last instant","ts":3,"pid":1,"tid":1}
+	]`
+	model, err := Parse(strings.NewReader(input), 12)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	startUS, endUS, ok := model.TraceBounds()
+	if !ok || startUS != 1 || endUS != math.Nextafter(3, math.Inf(1)) {
+		t.Fatalf("trace bounds=(%v,%v,%v), want (1,%v,true)", startUS, endUS, ok, math.Nextafter(3, math.Inf(1)))
+	}
+
+	window := model.NewEventQuery(nil, "").TimelineWindow(0, startUS, endUS, 16, 12, 1)
+	if window.TotalEventCount != 2 || len(window.Rows) != 2 {
+		t.Fatalf("full-trace timeline has %d events and %d rows, want 2", window.TotalEventCount, len(window.Rows))
+	}
+	if window.Rows[1].EventID != 1 {
+		t.Fatalf("last timeline event id=%d, want instant id 1", window.Rows[1].EventID)
 	}
 }
 

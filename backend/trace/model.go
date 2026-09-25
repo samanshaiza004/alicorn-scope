@@ -242,13 +242,20 @@ func (m *Model) NewEventQuery(enabledTrackIDs []uint64, textFilter string) *Even
 	return &EventQuery{model: m, indices: indices, enabled: enabled, filter: filter}
 }
 
-// TraceBounds returns the earliest event timestamp and latest event end. An
-// instant contributes its timestamp; a complete event contributes ts+dur.
+// TraceBounds returns the earliest event timestamp and an exclusive upper
+// bound that includes the latest event end. An instant contributes its
+// timestamp; a complete event contributes ts+dur. The extra representable
+// step lets a half-open timeline query include an instant at the maximum
+// timestamp.
 func (m *Model) TraceBounds() (startUS, endUS float64, ok bool) {
 	if m == nil || !m.hasTraceBounds {
 		return 0, 0, false
 	}
-	return m.traceStartUS, m.traceEndUS, true
+	endUS = math.Nextafter(m.traceEndUS, math.Inf(1))
+	if math.IsInf(endUS, 1) {
+		endUS = m.traceEndUS
+	}
+	return m.traceStartUS, endUS, true
 }
 
 // TimelineWindow queries one enabled track over [startUS,endUS), or all
