@@ -6,6 +6,11 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# PowerShell 7.3+ can promote a native program's non-zero exit code to a
+# terminating error. Git probes below intentionally use non-zero codes (for
+# example, cat-file when a pinned commit has not been fetched yet), so keep
+# exit-code handling explicit throughout this resolver.
+$PSNativeCommandUseErrorActionPreference = $false
 $ScopeRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $LockPath = Join-Path $ScopeRoot 'dependencies.lock.json'
 $Lock = Get-Content -Raw -LiteralPath $LockPath | ConvertFrom-Json
