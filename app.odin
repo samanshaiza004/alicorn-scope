@@ -1161,6 +1161,16 @@ scope_timeline_hit_test :: proc(view: frontend.Scope_View, x, y, width, height: 
 scope_on_pointer :: proc(state: rawptr, rt: ^alicorn.Runtime, event: alicorn.Pointer_Event, target: alicorn.Node_ID) {
 	app := cast(^Scope_App)state
 	view := &app.view
+	if view.ui.command_palette_open {
+		if event.kind == .Down && event.button == 1 && target == view.ui.command_palette_overlay_node {
+			panel, panel_ok := rt.nodes[view.ui.command_palette_panel_node]
+			inside_panel := panel_ok && event.x >= panel.bounds.x && event.x < panel.bounds.x+panel.bounds.w &&
+				event.y >= panel.bounds.y && event.y < panel.bounds.y+panel.bounds.h
+			if !inside_panel { _ = scope_dispatch_command(app, rt, .Toggle_Command_Palette) }
+		}
+		view.timeline_drag_active = false
+		return
+	}
 	id := view.ui.timeline_surface_node
 	if target == id || view.timeline_drag_active { app.timeline_pointer_events += 1 }
 	if event.kind == .Cancel || (event.kind == .Down && target != id) {
@@ -1472,6 +1482,9 @@ scope_app_run :: proc(app: ^Scope_App, smoke: bool) {
 		on_dialog=scope_on_dialog,
 		on_wake=scope_on_wake,
 		on_stop=scope_on_stop,
+	}
+	when ODIN_OS == .Windows {
+		application.window_decorations = .Integrated_Title_Bar
 	}
 	when ODIN_OS == .Windows || ODIN_OS == .Darwin {
 		application.menus = app.menus[:]

@@ -136,6 +136,8 @@ Scope_UI_State :: struct {
 
 	filter_node: alicorn.Node_ID,
 	command_palette_node: alicorn.Node_ID,
+	command_palette_overlay_node: alicorn.Node_ID,
+	command_palette_panel_node: alicorn.Node_ID,
 	tracks_scroll_node: alicorn.Node_ID,
 	events_scroll_node: alicorn.Node_ID,
 	arguments_scroll_node: alicorn.Node_ID,
@@ -467,34 +469,36 @@ scope_on_text_change :: proc(view: ^Scope_View, rt: ^alicorn.Runtime, change: al
 scope_render_command_palette :: proc(view: ^Scope_View, ui: ^alicorn.UI) {
 	scope_prepare_command_palette(view)
 	descriptors := scope_command_descriptors(view^)
-	alicorn.container_begin(
+	view.ui.command_palette_overlay_node = alicorn.modal_overlay_begin(
+		ui,
+		alicorn.key_string("scope-command-palette-overlay"),
+		style=alicorn.layout_style(.Column, padding=48, align=.Center, clip=true),
+	)
+	view.ui.command_palette_panel_node = alicorn.container_begin(
 		ui,
 		.Container,
 		label="scope-command-palette",
-		style=alicorn.layout_style(grow=1, padding=20, gap=12, clip=true),
+		style=alicorn.layout_style(width=680, max_width=720, padding=12, gap=6, clip=true),
 		color=SCOPE_PANEL_BACKGROUND,
 	)
-	alicorn.text(
+	alicorn.container_begin(
 		ui,
-		"Command Palette",
-		style=alicorn.layout_style(.Row, height=32),
-		text_style=alicorn.Text_Style{font_weight=alicorn.FONT_WEIGHT_SEMIBOLD},
+		.Container,
+		label="scope-command-palette-input-row",
+		style=alicorn.layout_style(.Row, height=40, gap=8, align=.Center),
 	)
+	alicorn.text(ui, ">", style=alicorn.layout_style(.Row, width=16, height=36), text_style=alicorn.Text_Style{font_weight=alicorn.FONT_WEIGHT_SEMIBOLD})
 	palette_id := alicorn.text_field(
 		ui,
 		view.ui.command_palette_query,
 		key=alicorn.key_string("scope-command-palette-query"),
-		style=alicorn.layout_style(.Row, height=38),
+		style=alicorn.layout_style(.Row, height=40, grow=1),
 		text_style=alicorn.Text_Style{overflow=.Ellipsis},
 	)
 	view.ui.command_palette_node = palette_id
-	alicorn.text(
-		ui,
-		"Type a command · ↑/↓ move · Enter run · Esc close",
-		style=alicorn.layout_style(.Row, height=24),
-	)
+	alicorn.container_end(ui)
 	if view.ui.palette_visible_count == 0 {
-		alicorn.text(ui, "No matching commands", style=alicorn.layout_style(.Row, height=32))
+		alicorn.text(ui, "No matching commands", style=alicorn.layout_style(.Row, height=34, padding=8))
 	} else {
 		for index := 0; index < view.ui.palette_visible_count; index += 1 {
 			command_id := view.ui.palette_visible_commands[index]
@@ -509,8 +513,8 @@ scope_render_command_palette :: proc(view: ^Scope_View, ui: ^alicorn.UI) {
 				ui,
 				label,
 				key=alicorn.key_pair(u64(command_id), 3),
-				state=alicorn.Button_State{selected=selected},
-				style=alicorn.layout_style(.Row, height=38),
+				state=alicorn.Button_State{selected=selected, quiet=!selected},
+				style=alicorn.layout_style(.Row, height=34),
 				text_style=alicorn.Text_Style{overflow=.Ellipsis},
 				content_style=alicorn.button_content_style(horizontal=.Start, vertical=.Center, padding_x=10, padding_y=4),
 			) {
@@ -519,6 +523,7 @@ scope_render_command_palette :: proc(view: ^Scope_View, ui: ^alicorn.UI) {
 		}
 	}
 	alicorn.container_end(ui)
+	alicorn.modal_overlay_end(ui)
 }
 
 scope_event_position :: proc(view: Scope_View, id: u64) -> int {
@@ -666,9 +671,6 @@ scope_render :: proc(view: ^Scope_View, rt: ^alicorn.Runtime) -> alicorn.Node_ID
 	}
 	alicorn.container_end(&ui)
 
-	if view.ui.command_palette_open {
-		scope_render_command_palette(view, &ui)
-	} else {
 	trace_label := view.trace_path
 	if len(trace_label) == 0 { trace_label = "Open a Chrome Trace Event JSON file to begin" }
 	summary := view.trace_summary
@@ -1105,11 +1107,11 @@ scope_render :: proc(view: ^Scope_View, rt: ^alicorn.Runtime) -> alicorn.Node_ID
 
 	alicorn.split_second_end(&ui, outer_split)
 	alicorn.split_end(&ui, outer_split)
-	}
 	alicorn.container_end(&ui) // scope-root
+	if view.ui.command_palette_open { scope_render_command_palette(view, &ui) }
 	alicorn.end_frame(&ui)
 
-	if !view.ui.command_palette_open { view.ui.filter_node = filter_id }
+	view.ui.filter_node = filter_id
 	if view.ui.command_palette_focus_pending && view.ui.command_palette_node != 0 {
 		_ = alicorn.focus(rt, view.ui.command_palette_node)
 		view.ui.command_palette_focus_pending = false

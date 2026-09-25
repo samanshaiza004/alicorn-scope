@@ -9,9 +9,9 @@ Scope now routes its main operations through a small app-owned command model. Th
 - In the palette, try **Fit Whole Trace**, **Fit Selection**, **Previous Event**, **Next Event**, **Show Overview**, or **Clear Event Selection**.
 - Choose **View → Runtime Inspector**, or use the **Runtime** button in the Inspector pane, to inspect Alicorn's retained nodes, bounds, dirty state, interaction state, frame counters, recent runtime events, and Scope command dispatches. The snapshot refreshes when the application next builds; it does not poll while idle.
 
-The palette is intentionally implemented inside Scope. Alicorn provides the native menu command-ID boundary and the runtime inspection/trace snapshot APIs, but does not yet expose a generic command registry or palette widget.
+The palette is a centered, modal quick-input over the still-visible workspace. It takes focus when opened, confines pointer and keyboard traversal, closes on Escape or a click on the backdrop, and restores the previous focus when dismissed. Its implementation and command matching remain app-local; Alicorn provides the small retained modal-overlay primitive, native menu command-ID boundary, and runtime inspection/trace snapshot APIs, but not a generic command registry or palette widget.
 
-Native menus are enabled on Windows and macOS. On Linux, use the visible **Open Trace...** and **Commands...** controls; Ctrl+O and Ctrl+Shift+P remain available as keyboard shortcuts.
+Native menus are enabled on Windows and macOS. Windows opts into Alicorn's integrated caption-label mode while preserving the native caption buttons; macOS uses the standard system menu bar and title bar. On Linux, use the visible **Open Trace...** and **Commands...** controls; Ctrl+O and Ctrl+Shift+P remain available as keyboard shortcuts.
 
 ## Command behavior
 
