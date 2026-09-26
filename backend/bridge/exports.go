@@ -141,7 +141,7 @@ func Scope_SetTrackEnabled(traceGeneration C.uint64_t, trackID C.uint64_t, enabl
 //export Scope_RequestTrackWindow
 func Scope_RequestTrackWindow(traceGeneration C.uint64_t, queryGeneration C.uint64_t, first C.uint64_t, count C.uint32_t) C.int32_t {
 	return exportStatus(func() int32 {
-		if count == 0 || count > 512 || uint64(first)%512 != 0 {
+		if !validWindowRange(uint64(first), uint32(count)) {
 			return statusInvalidArgument
 		}
 		return backendDispatchTrackWindow(uint64(traceGeneration), uint64(queryGeneration), uint64(first), uint32(count))
@@ -158,7 +158,7 @@ func Scope_SelectEvent(traceGeneration C.uint64_t, eventID C.uint64_t) C.int32_t
 //export Scope_RequestEventWindow
 func Scope_RequestEventWindow(traceGeneration C.uint64_t, queryGeneration C.uint64_t, first C.uint64_t, count C.uint32_t) C.int32_t {
 	return exportStatus(func() int32 {
-		if count == 0 || count > 512 || uint64(first)%512 != 0 {
+		if !validWindowRange(uint64(first), uint32(count)) {
 			return statusInvalidArgument
 		}
 		return backendDispatchWindow(uint64(traceGeneration), uint64(queryGeneration), uint64(first), uint32(count))

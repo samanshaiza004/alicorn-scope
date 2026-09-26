@@ -116,6 +116,27 @@ func TestWindowCommandCoalescingKeepsNewest(t *testing.T) {
 	}
 }
 
+func TestVirtualizedWindowsAllowSlidingOffsetsAndRemainBounded(t *testing.T) {
+	if !validWindowRange(40_192, 512) {
+		t.Fatal("sliding window at a non-page-aligned row was rejected")
+	}
+	if !validWindowRange(40_448, 46) {
+		t.Fatal("short sliding window near the end of a result set was rejected")
+	}
+	for _, test := range []struct {
+		first uint64
+		count uint32
+	}{
+		{first: 0, count: 0},
+		{first: 0, count: serviceMaxRows + 1},
+		{first: math.MaxUint64 - 10, count: 512},
+	} {
+		if validWindowRange(test.first, test.count) {
+			t.Errorf("invalid virtualized window range (%d, %d) was accepted", test.first, test.count)
+		}
+	}
+}
+
 func TestTrackWindowCommandCoalescingKeepsNewest(t *testing.T) {
 	var latest *serviceCommand
 	latest = coalesceWindowCommand(latest, serviceCommand{Kind: "track_window", Sequence: 12, FirstRow: 0})

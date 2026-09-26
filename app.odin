@@ -959,15 +959,13 @@ scope_consume_interaction :: proc(app: ^Scope_App, rt: ^alicorn.Runtime) {
 		_ = scope_request_timeline(app)
 	case .Track_Window_Requested:
 		first := u64(max(0, interaction.first_row))
-		aligned := (first/u64(SCOPE_EVENT_WINDOW_ROWS))*u64(SCOPE_EVENT_WINDOW_ROWS)
-		_ = app.backend.request_tracks(app.state.trace_generation, app.state.query_generation, aligned, SCOPE_EVENT_WINDOW_ROWS)
+		_ = app.backend.request_tracks(app.state.trace_generation, app.state.query_generation, first, SCOPE_EVENT_WINDOW_ROWS)
 	case .Event_Selected:
 		alicorn.trace_mutation(rt, "Scope event selection committed")
 		_ = app.backend.select_event(app.state.trace_generation, interaction.event_id)
 	case .Window_Requested:
 		first := u64(max(0, interaction.first_row))
-		aligned := (first/u64(SCOPE_EVENT_WINDOW_ROWS))*u64(SCOPE_EVENT_WINDOW_ROWS)
-		_ = app.backend.request_window(app.state.trace_generation, app.state.query_generation, aligned, SCOPE_EVENT_WINDOW_ROWS)
+		_ = app.backend.request_window(app.state.trace_generation, app.state.query_generation, first, SCOPE_EVENT_WINDOW_ROWS)
 	}
 	frontend.scope_clear_interaction(&app.view)
 }

@@ -412,6 +412,20 @@ scope_cached_track_count :: proc(view: Scope_View) -> int {
 	return min(len(view.tracks), SCOPE_EVENT_WINDOW_SIZE)
 }
 
+scope_window_first_row :: proc(total_rows, anchor_row: int) -> int {
+	if total_rows <= 0 { return 0 }
+	window_rows := min(total_rows, SCOPE_EVENT_WINDOW_SIZE)
+	max_first_row := max(0, total_rows-window_rows)
+	anchor := clamp(anchor_row, 0, total_rows-1)
+	return clamp(anchor-window_rows/2, 0, max_first_row)
+}
+
+scope_window_contains :: proc(first_row, total_rows, row: int) -> bool {
+	if first_row < 0 || row < first_row || row >= total_rows { return false }
+	window_rows := min(SCOPE_EVENT_WINDOW_SIZE, total_rows-first_row)
+	return row-first_row < window_rows
+}
+
 scope_track_cache_index :: proc(view: Scope_View, global_row: int) -> int {
 	local_row := global_row - view.track_first_row
 	if local_row < 0 || local_row >= scope_cached_track_count(view) { return -1 }
@@ -420,8 +434,9 @@ scope_track_cache_index :: proc(view: Scope_View, global_row: int) -> int {
 
 scope_request_track_window :: proc(view: ^Scope_View, global_row: int) -> bool {
 	if global_row < 0 || global_row >= view.track_total_count { return false }
-	first_row := (global_row/SCOPE_EVENT_WINDOW_SIZE)*SCOPE_EVENT_WINDOW_SIZE
-	if view.ui.has_pending_track_window_request && view.ui.pending_track_window_first_row == first_row {
+	if scope_track_cache_index(view^, global_row) >= 0 { return false }
+	first_row := scope_window_first_row(view.track_total_count, global_row)
+	if view.ui.has_pending_track_window_request && scope_window_contains(view.ui.pending_track_window_first_row, view.track_total_count, global_row) {
 		return false
 	}
 	view.ui.has_pending_track_window_request = true
@@ -447,8 +462,9 @@ scope_event_cache_index :: proc(view: Scope_View, global_row: int) -> int {
 
 scope_request_event_window :: proc(view: ^Scope_View, global_row: int) -> bool {
 	if global_row < 0 || global_row >= view.event_total_count { return false }
-	first_row := (global_row/SCOPE_EVENT_WINDOW_SIZE)*SCOPE_EVENT_WINDOW_SIZE
-	if view.ui.has_pending_window_request && view.ui.pending_window_first_row == first_row {
+	if scope_event_cache_index(view^, global_row) >= 0 { return false }
+	first_row := scope_window_first_row(view.event_total_count, global_row)
+	if view.ui.has_pending_window_request && scope_window_contains(view.ui.pending_window_first_row, view.event_total_count, global_row) {
 		return false
 	}
 	view.ui.has_pending_window_request = true
@@ -963,12 +979,14 @@ scope_render :: proc(view: ^Scope_View, rt: ^alicorn.Runtime) -> alicorn.Node_ID
 	alicorn.container_begin(&ui, .Container, label="scope-timeline-ruler", style=alicorn.layout_style(.Row, height=22), color=SCOPE_PANEL_BACKGROUND)
 	for tick := 0; tick <= 4; tick += 1 {
 		offset_ms := span_us*f64(tick)/4.0/1000.0
+		if !alicorn.component_begin(&ui, alicorn.key_u64(u64(tick))) { continue }
 		alicorn.text(
 			&ui,
 			fmt.tprintf("+%.2f ms", offset_ms),
 			style=alicorn.layout_style(.Row, grow=1, height=22),
 			text_style=alicorn.Text_Style{overflow=.Ellipsis},
 		)
+		alicorn.component_end(&ui)
 	}
 	alicorn.container_end(&ui)
 	alicorn.container_begin(

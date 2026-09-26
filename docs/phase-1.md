@@ -49,11 +49,13 @@ event.
 
 ## Window behavior
 
-Track and event pages are aligned to 512-row boundaries. Odin retains one
-decoded page of each kind, including trace and query generations. Scrolling
-within a cached range performs no foreign call. Crossing a boundary submits a
-per-domain latest-wins request. The frontend rejects any response whose
-trace/query generation differs from current state.
+Track and event windows are bounded to 512 rows and slide around the requested
+row, so a virtual-list viewport can straddle an old page edge without
+alternating between two pages. Odin retains one decoded window of each kind,
+including trace and query generations. Scrolling within a cached range performs
+no foreign call. A missing range submits a per-domain latest-wins request. The
+frontend rejects any response whose trace/query generation differs from current
+state.
 
 Caliber latest-value telemetry has five `size_t` values:
 `phase`, `bytes_read`, `bytes_total`, `trace_generation`, and

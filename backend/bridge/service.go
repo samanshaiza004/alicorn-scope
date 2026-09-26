@@ -242,7 +242,7 @@ func backendDispatchSelection(traceGen, eventID uint64) int32 {
 }
 
 func backendDispatchWindow(traceGen, queryGen, first uint64, count uint32) int32 {
-	if count == 0 || count > serviceMaxRows || first%serviceMaxRows != 0 {
+	if !validWindowRange(first, count) {
 		return statusInvalidArgument
 	}
 	return dispatchServiceCommand(serviceCommand{
@@ -254,8 +254,12 @@ func backendDispatchWindow(traceGen, queryGen, first uint64, count uint32) int32
 	})
 }
 
+func validWindowRange(first uint64, count uint32) bool {
+	return count > 0 && count <= serviceMaxRows && first <= math.MaxUint64-uint64(count)
+}
+
 func backendDispatchTrackWindow(traceGen, queryGen, first uint64, count uint32) int32 {
-	if count == 0 || count > serviceMaxRows || first%serviceMaxRows != 0 {
+	if !validWindowRange(first, count) {
 		return statusInvalidArgument
 	}
 	return dispatchServiceCommand(serviceCommand{
