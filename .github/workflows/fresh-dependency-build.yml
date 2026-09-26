@@ -41,3 +41,16 @@ jobs:
       - name: Build through the managed dependency resolver (macOS)
         if: runner.os == 'macOS'
         run: sh tools/build.sh
+
+      - name: Check Caliber boundary (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          .\tools\caliber.ps1 doctor
+          .\tools\caliber.ps1 check
+
+      - name: Check Caliber boundary (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          sh tools/caliber.sh doctor
+          sh tools/caliber.sh check

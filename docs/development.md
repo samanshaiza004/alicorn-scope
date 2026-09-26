@@ -137,3 +137,23 @@ POSIX users can call the corresponding wrapper, for example
 `caliber` from `PATH` and then bootstraps the pinned source. `CALIBER_CLI_REPOSITORY`
 may point the bootstrap at a trusted mirror. Do not pin an unpushed commit: a
 fresh clone must be able to fetch every locked object from its repository.
+
+## Caliber diagnostics
+
+After building Scope, run the project-owned diagnostics without launching its
+window:
+
+Windows:
+    .\tools\caliber.ps1 doctor
+    .\tools\caliber.ps1 check
+
+macOS/Linux:
+    sh tools/caliber.sh doctor
+    sh tools/caliber.sh check
+
+Doctor reports the local lock and managed dependency state, project-declared
+tools, the produced Caliber library's loadability and host architecture
+compatibility, ABI version/table extent, and required functions. Check also
+exercises context creation/destruction, command/state/resource round trips,
+and wake/wait/stop/join. These commands do not install toolchains or build
+Scope; build Scope first so its native Caliber library exists.
