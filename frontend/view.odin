@@ -19,6 +19,17 @@ SCOPE_COMMAND_PALETTE_INPUT_HEIGHT :: f32(40)
 SCOPE_COMMAND_PALETTE_PADDING :: f32(12)
 SCOPE_COMMAND_PALETTE_GAP :: f32(6)
 
+SCOPE_SEMANTIC_TRACK_NAMESPACE :: u64(1)
+SCOPE_SEMANTIC_EVENT_NAMESPACE :: u64(2)
+
+scope_track_semantic_id :: proc(track_id: u64) -> alicorn.Semantic_ID {
+	return alicorn.Semantic_ID{namespace=SCOPE_SEMANTIC_TRACK_NAMESPACE, value=track_id}
+}
+
+scope_event_semantic_id :: proc(event_id: u64) -> alicorn.Semantic_ID {
+	return alicorn.Semantic_ID{namespace=SCOPE_SEMANTIC_EVENT_NAMESPACE, value=event_id}
+}
+
 Scope_Trace_Load_Status :: enum {
 	Empty,
 	Loading,
@@ -653,6 +664,7 @@ scope_on_navigation_key :: proc(view: ^Scope_View, rt: ^alicorn.Runtime, key: Sc
 		view.ui.has_selected_event_row = true
 		view.ui.selected_event_row = position
 		view.ui.has_pending_navigation_row = false
+		_ = alicorn.semantic_focus_set(rt, scope_event_semantic_id(event.id), view.ui.events_scroll_node)
 		scope_publish_interaction(view, .Event_Selected, 0, event.id)
 	} else {
 		view.ui.has_pending_navigation_row = true
@@ -805,6 +817,7 @@ scope_render :: proc(view: ^Scope_View, rt: ^alicorn.Runtime) -> alicorn.Node_ID
 		style=alicorn.layout_style(grow=1, clip=true),
 		label="scope-tracks-list",
 		axes=.Vertical,
+		focusable=true,
 	)
 	view.ui.tracks_scroll_node = track_list.scroll.id
 	track_request_position := -1
@@ -834,6 +847,7 @@ scope_render :: proc(view: ^Scope_View, rt: ^alicorn.Runtime) -> alicorn.Node_ID
 			text_style=alicorn.Text_Style{overflow=.Ellipsis},
 			content_style=alicorn.button_content_style(horizontal=.Start, vertical=.Center, padding_x=8, padding_y=4),
 		)
+		_ = alicorn.semantic_bind(&ui, scope_track_semantic_id(track.id))
 		if clicked {
 			track_changed := !view.ui.has_selected_track || view.ui.selected_track_id != track.id
 			view.ui.has_selected_track = true
@@ -851,6 +865,7 @@ scope_render :: proc(view: ^Scope_View, rt: ^alicorn.Runtime) -> alicorn.Node_ID
 				view.timeline_ready = false
 				view.timeline_mode = .None
 			}
+			_ = alicorn.semantic_focus_set(rt, scope_track_semantic_id(track.id), view.ui.tracks_scroll_node)
 			scope_publish_interaction(view, .Track_Selected, track.id, 0)
 			selection_changed = true
 		}
@@ -988,6 +1003,7 @@ scope_render :: proc(view: ^Scope_View, rt: ^alicorn.Runtime) -> alicorn.Node_ID
 		style=alicorn.layout_style(grow=1, clip=true),
 		label="scope-events-list",
 		axes=.Vertical,
+		focusable=true,
 	)
 	view.ui.events_scroll_node = event_list.scroll.id
 	request_position := -1
@@ -1023,12 +1039,14 @@ scope_render :: proc(view: ^Scope_View, rt: ^alicorn.Runtime) -> alicorn.Node_ID
 			text_style=alicorn.Text_Style{overflow=.Ellipsis},
 			content_style=alicorn.button_content_style(horizontal=.Start, vertical=.Center, padding_x=8, padding_y=4),
 		)
+		_ = alicorn.semantic_bind(&ui, scope_event_semantic_id(event.id))
 		if clicked {
 			view.ui.has_selected_event = true
 			view.ui.selected_event_id = event.id
 			view.ui.has_selected_event_row = true
 			view.ui.selected_event_row = position
 			view.ui.has_pending_navigation_row = false
+			_ = alicorn.semantic_focus_set(rt, scope_event_semantic_id(event.id), view.ui.events_scroll_node)
 			scope_publish_interaction(view, .Event_Selected, 0, event.id)
 			selection_changed = true
 		}
@@ -1163,6 +1181,13 @@ scope_render :: proc(view: ^Scope_View, rt: ^alicorn.Runtime) -> alicorn.Node_ID
 	alicorn.split_end(&ui, outer_split)
 	alicorn.container_end(&ui) // scope-root
 	if view.ui.command_palette_open { scope_render_command_palette(view, &ui) }
+	if view.ui.has_selected_event {
+		_ = alicorn.semantic_focus_set(rt, scope_event_semantic_id(view.ui.selected_event_id), view.ui.events_scroll_node)
+	} else if view.ui.has_selected_track {
+		_ = alicorn.semantic_focus_set(rt, scope_track_semantic_id(view.ui.selected_track_id), view.ui.tracks_scroll_node)
+	} else {
+		_ = alicorn.semantic_focus_clear(rt)
+	}
 	alicorn.end_frame(&ui)
 
 	view.ui.filter_node = filter_id

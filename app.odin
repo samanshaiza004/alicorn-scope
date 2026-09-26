@@ -1265,6 +1265,7 @@ scope_on_pointer :: proc(state: rawptr, rt: ^alicorn.Runtime, event: alicorn.Poi
 					view.ui.selected_event_id = event_id
 					view.ui.has_selected_event_row = false
 					view.ui.has_pending_navigation_row = false
+					_ = alicorn.semantic_focus_set(rt, frontend.scope_event_semantic_id(event_id), view.ui.events_scroll_node)
 					frontend.scope_publish_interaction(view, .Event_Selected, 0, event_id)
 					alicorn.trace_mutation(rt, "Scope timeline event selected")
 					alicorn.invalidate_root(rt, "scope timeline selected event")
