@@ -2,12 +2,10 @@
 
 ## Ordinary developer workflow
 
-Scope owns its pinned source dependencies. The first invocation reads
-`dependencies.lock.json`, clones Alicorn and Caliber into `.deps/alicorn` and
-`.deps/caliber`, checks out the locked commits, and then builds the application.
-Subsequent builds reuse those clean pinned checkouts. The resolver never uses
-or changes a sibling `../alicorn` or `../caliber` directory unless you
-explicitly supply it as an override.
+Scope owns its exact source dependency lock. The first invocation bootstraps
+the pinned Caliber CLI into project-owned `.tools/`, then `caliber sync`
+materializes the lock into `.deps/alicorn` and `.deps/caliber`. Subsequent
+builds reuse those clean pinned checkouts. No sibling repository is required.
 
 Install Git, Odin, 64-bit Go 1.25+, and Rust/Cargo first. The Odin compiler's
 Windows release also requires the Microsoft C++ build tools and Windows SDK.
@@ -49,11 +47,16 @@ Pass a trace as the first application argument to skip the file dialog:
 sh tools/run.sh /path/to/capture.json
 ```
 
-The first run fetches the locked source revisions and may take longer while
-Cargo builds Caliber and Go/Odin build Scope. `tools/bootstrap.ps1` or
-`sh tools/bootstrap.sh` can resolve the dependencies without building. The
-same build entry points are used by the `fresh-dependency-build` CI workflow;
-CI starts without preexisting sibling checkouts.
+The first run fetches the pinned Caliber CLI source and locked dependency
+revisions; then Cargo builds Caliber and Go/Odin build Scope.
+`tools/bootstrap.ps1` or `sh tools/bootstrap.sh` synchronizes dependencies
+without building the application. CI uses the same managed workflow and does
+not require sibling checkouts.
+
+The Caliber CLI bootstrap pin is recorded separately in
+`.caliber-cli-revision`; it pins the tool that reads the dependency lock. The
+application dependency revisions are authoritative only in
+`dependencies.lock.json`.
 
 ## Developing Alicorn or Caliber alongside Scope
 
@@ -114,14 +117,23 @@ pass `-ForceDeps`. POSIX equivalents are `sh tools/clean.sh` and
 
 ## Updating a pinned dependency
 
-Update the full commit ID in `dependencies.lock.json`, then validate the
-ordinary managed path from a clean checkout (or after explicitly moving the
-old managed directory aside):
+Use the same dependency CLI that normal builds invoke. `status` is local and
+does not check remotes; `sync` never updates revisions. To deliberately update
+one dependency, Caliber resolves its `ref`, runs the Scope build validation
+hook, then atomically updates the lock:
 
 ```powershell
-.\tools\bootstrap.ps1
-.\tools\build.ps1
+& .\tools\caliber.ps1 status
+& .\tools\caliber.ps1 sync
+& .\tools\caliber.ps1 update alicorn
+& .\tools\caliber.ps1 update caliber
+& .\tools\caliber.ps1 pin alicorn ..\alicorn
+& .\tools\caliber.ps1 pin caliber ..\caliber
 ```
 
-The lockfile remains the single source of truth. Do not pin an unpushed commit:
-a fresh clone must be able to fetch every locked object from its repository.
+POSIX users can call the corresponding wrapper, for example
+`sh tools/caliber.sh status` or `sh tools/caliber.sh update alicorn`.
+`CALIBER_CLI` may name an explicitly supplied CLI; otherwise the wrapper uses
+`caliber` from `PATH` and then bootstraps the pinned source. `CALIBER_CLI_REPOSITORY`
+may point the bootstrap at a trusted mirror. Do not pin an unpushed commit: a
+fresh clone must be able to fetch every locked object from its repository.

@@ -62,11 +62,13 @@ These measurements exclude Caliber transport and Odin decoding.
 
 This run was performed on Windows only. The macOS build, native open dialog,
 keyboard/track toggling, and the same 30-second idle proof remain to be run on
-the user's Mac. Caliber's blocking wake ABI has since been committed and pushed
-as `4814a5161809f37d07f8456b81988013f038867a`; `dependencies.lock.json` pins
-that revision so a clean checkout can build against the published ABI.
+the user's Mac. The original blocking-wake validation used Caliber
+`4814a5161809f37d07f8456b81988013f038867a`; Phase 0B later moved the runtime
+dependency through `caliber update caliber` after the candidate passed Scope's
+build hook. The current authoritative revision is in
+`dependencies.lock.json`.
 
-## Managed dependency workflow
+## Prior managed dependency resolver check (historical)
 
 Validated on Windows on 2026-09-23 after starting without a Scope-owned
 `.deps/` directory and with the sibling roots unset:
@@ -82,6 +84,31 @@ Validated on Windows on 2026-09-23 after starting without a Scope-owned
   the shell bootstrap resolved the same managed pins. This checks shell syntax
   and resolver behavior on Windows, not a macOS/Linux native build.
 
-The fresh-checkout GitHub Actions workflow now calls these same build scripts
-on Windows and macOS. That hosted workflow has not yet run from this local
-change; the macOS native build and interactive gate remain outstanding.
+The fresh-checkout GitHub Actions workflow called these build scripts on
+Windows and macOS. These notes describe the earlier project-local resolver;
+the Phase 0B section below records its replacement by Caliber.
+
+## Phase 0B: Caliber dependency CLI and Scope migration
+
+Validated on Windows on 2026-09-25:
+
+- The CLI bootstrapped from the pinned Caliber source into Scope-owned
+  `.tools/` using a local mirror of the pushed source commit for this test. The
+  wrapper defaults to the public Caliber repository and does not require that
+  mirror or a sibling checkout for a fresh developer clone.
+- `caliber status` reported both managed checkouts locally without remote
+  access. A second `sync` also passed with Git restricted to the `file`
+  protocol, proving already-materialized locked objects require no network.
+- `caliber update caliber` moved Scope from the former `4814a51` revision to
+  the current Caliber commit only after the configured hook built the Caliber
+  candidate, Go backend, and Odin Scope application.
+- `tools/run.ps1 -Smoke` rebuilt from the new lock and passed the native SDL
+  smoke (`alicorn-scope PASS`).
+- `go test ./...` passed for both Scope Go packages.
+- A build using the developer-owned `../alicorn` override passed with
+  `-DevDeps`; its HEAD and worktree stayed unchanged.
+- The POSIX wrappers and candidate hook passed `sh -n` under Git Bash. The
+  POSIX `status` and offline `sync` wrapper calls also passed there.
+
+The hosted fresh-checkout workflow has not run on this change. macOS/Linux
+native builds and interactive checks remain outstanding.

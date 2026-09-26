@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "validation": {
+    "alicorn": {
+      "windows": ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "tools/validate-candidate.ps1"],
+      "unix": ["sh", "tools/validate-candidate.sh"]
+    },
+    "caliber": {
+      "windows": ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "tools/validate-candidate.ps1"],
+      "unix": ["sh", "tools/validate-candidate.sh"]
+    }
+  }
+}

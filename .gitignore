@@ -1,5 +1,6 @@
 out/
 .deps/
+.tools/
 *.dll
 *.dylib
 *.so
