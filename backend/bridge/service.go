@@ -1,7 +1,7 @@
 package main
 
 /*
-#include "caliber_api.h"
+#include "scope_backend.h"
 */
 import "C"
 
@@ -42,7 +42,7 @@ const (
 	telemetryReady   = uint64(2)
 	telemetryFailed  = uint64(3)
 
-	// CaliberStatus::Unavailable is 7 in the v1 ABI. The C header publishes
+	// CaliberStatus::Unavailable is 7 in the v1 ABI. The canonical C header publishes
 	// only the statuses needed by its callers, so the empty-queue value is
 	// named here from the ABI contract.
 	caliberUnavailable = int32(7)
@@ -182,10 +182,10 @@ func backendStart() error {
 		disabledTracks: make(map[uint64]struct{}),
 		state:          emptyServiceState(),
 	}
-	if status := publishServiceState(s.state); status != int32(C.CALIBER_OK) {
+	if status := publishServiceState(s.state); status != int32(C.CALIBER_STATUS_OK) {
 		return fmt.Errorf("publish initial state: Caliber status %d", status)
 	}
-	if status := publishProgress(telemetryIdle, 0, 0, 0, 0); status != int32(C.CALIBER_OK) {
+	if status := publishProgress(telemetryIdle, 0, 0, 0, 0); status != int32(C.CALIBER_STATUS_OK) {
 		return fmt.Errorf("publish initial telemetry: Caliber status %d", status)
 	}
 	service = s
@@ -317,7 +317,7 @@ func dispatchServiceCommand(command serviceCommand) int32 {
 		(*C.uint8_t)(unsafe.Pointer(&data[0])),
 		C.size_t(len(data)),
 	))
-	if status == int32(C.CALIBER_OK) {
+	if status == int32(C.CALIBER_STATUS_OK) {
 		if advancesControl {
 			s.controlEpoch.Store(command.ControlEpoch)
 		}
@@ -391,10 +391,10 @@ func (s *backendService) drainCommands(buffer []byte) bool {
 		if status == caliberUnavailable {
 			break
 		}
-		if status == int32(C.CALIBER_STOPPED) {
+		if status == int32(C.CALIBER_STATUS_STOPPED) {
 			return false
 		}
-		if status != int32(C.CALIBER_OK) || uint64(length) > uint64(len(buffer)) {
+		if status != int32(C.CALIBER_STATUS_OK) || uint64(length) > uint64(len(buffer)) {
 			return false
 		}
 		var command serviceCommand
@@ -493,7 +493,7 @@ func (s *backendService) processOpen(command serviceCommand) {
 		return
 	}
 	status := publishServiceState(candidateState)
-	if status != int32(C.CALIBER_OK) {
+	if status != int32(C.CALIBER_STATUS_OK) {
 		serviceMu.Unlock()
 		s.releaseResource(trackRef)
 		s.releaseResource(windowRef)
@@ -666,7 +666,7 @@ func (s *backendService) rebuildQuery(controlEpoch uint64) {
 		return
 	}
 	status := publishServiceState(candidate)
-	if status != int32(C.CALIBER_OK) {
+	if status != int32(C.CALIBER_STATUS_OK) {
 		serviceMu.Unlock()
 		s.releaseResource(trackRef)
 		s.releaseResource(windowRef)
@@ -708,7 +708,7 @@ func (s *backendService) processSelection(command serviceCommand) {
 		serviceMu.Unlock()
 		return
 	}
-	if publishServiceState(candidate) == int32(C.CALIBER_OK) {
+	if publishServiceState(candidate) == int32(C.CALIBER_STATUS_OK) {
 		s.state = candidate
 	}
 	serviceMu.Unlock()
@@ -726,7 +726,7 @@ func (s *backendService) processWindow(command serviceCommand) {
 	}
 	s.releaseRetiredResources()
 	windowRef, status := publishServiceResource(data)
-	if status != int32(C.CALIBER_OK) {
+	if status != int32(C.CALIBER_STATUS_OK) {
 		return
 	}
 	candidate := s.state
@@ -740,7 +740,7 @@ func (s *backendService) processWindow(command serviceCommand) {
 		s.releaseResource(windowRef)
 		return
 	}
-	if publishServiceState(candidate) != int32(C.CALIBER_OK) {
+	if publishServiceState(candidate) != int32(C.CALIBER_STATUS_OK) {
 		serviceMu.Unlock()
 		s.releaseResource(windowRef)
 		return
@@ -762,7 +762,7 @@ func (s *backendService) processTimelineWindow(command serviceCommand) {
 	}
 	s.releaseRetiredResources()
 	timelineRef, status := publishServiceResource(data)
-	if status != int32(C.CALIBER_OK) {
+	if status != int32(C.CALIBER_STATUS_OK) {
 		return
 	}
 	candidate := s.state
@@ -773,7 +773,7 @@ func (s *backendService) processTimelineWindow(command serviceCommand) {
 		s.releaseResource(timelineRef)
 		return
 	}
-	if publishServiceState(candidate) != int32(C.CALIBER_OK) {
+	if publishServiceState(candidate) != int32(C.CALIBER_STATUS_OK) {
 		serviceMu.Unlock()
 		s.releaseResource(timelineRef)
 		return
@@ -796,7 +796,7 @@ func (s *backendService) processTrackWindow(command serviceCommand) {
 	}
 	s.releaseRetiredResources()
 	tracksRef, status := publishServiceResource(data)
-	if status != int32(C.CALIBER_OK) {
+	if status != int32(C.CALIBER_STATUS_OK) {
 		return
 	}
 	candidate := s.state
@@ -809,7 +809,7 @@ func (s *backendService) processTrackWindow(command serviceCommand) {
 		s.releaseResource(tracksRef)
 		return
 	}
-	if publishServiceState(candidate) != int32(C.CALIBER_OK) {
+	if publishServiceState(candidate) != int32(C.CALIBER_STATUS_OK) {
 		serviceMu.Unlock()
 		s.releaseResource(tracksRef)
 		return
@@ -894,11 +894,11 @@ func (s *backendService) buildPairResources(model *trace.Model, query *trace.Eve
 	}
 	s.releaseRetiredResources()
 	trackRef, status := publishServiceResource(trackData)
-	if status != int32(C.CALIBER_OK) {
+	if status != int32(C.CALIBER_STATUS_OK) {
 		return resourceRef{}, resourceRef{}, trace.EventPage{}, fmt.Errorf("publish track catalog: Caliber status %d", status)
 	}
 	windowRef, status := publishServiceResource(eventData)
-	if status != int32(C.CALIBER_OK) {
+	if status != int32(C.CALIBER_STATUS_OK) {
 		s.releaseResource(trackRef)
 		return resourceRef{}, resourceRef{}, trace.EventPage{}, fmt.Errorf("publish event window: Caliber status %d", status)
 	}
@@ -984,7 +984,7 @@ func (s *backendService) publishStateIfCurrent(candidate serviceState, current f
 	if s.stopped || !current() {
 		return false
 	}
-	if publishServiceState(candidate) != int32(C.CALIBER_OK) {
+	if publishServiceState(candidate) != int32(C.CALIBER_STATUS_OK) {
 		return false
 	}
 	s.state = candidate
@@ -1019,7 +1019,7 @@ func publishServiceResource(data []byte) (resourceRef, int32) {
 		&id,
 		&generation,
 	))
-	if status != int32(C.CALIBER_OK) {
+	if status != int32(C.CALIBER_STATUS_OK) {
 		return resourceRef{}, status
 	}
 	return resourceRef{id: uint64(id), generation: uint64(generation)}, status

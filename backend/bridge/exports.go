@@ -2,7 +2,7 @@ package main
 
 /*
 #cgo linux LDFLAGS: -ldl
-#include "caliber_api.h"
+#include "scope_backend.h"
 #include <stdlib.h>
 */
 import "C"
@@ -16,11 +16,11 @@ import (
 func main() {}
 
 const (
-	statusOK              = int32(0)
-	statusInvalidArgument = int32(1)
-	statusBufferTooSmall  = int32(3)
-	statusUnavailable     = int32(7)
-	statusInternal        = int32(10)
+	statusOK              = int32(C.CALIBER_STATUS_OK)
+	statusInvalidArgument = int32(C.CALIBER_STATUS_INVALID_ARGUMENT)
+	statusBufferTooSmall  = int32(C.CALIBER_STATUS_BUFFER_TOO_SMALL)
+	statusUnavailable     = int32(C.CALIBER_STATUS_UNAVAILABLE)
+	statusInternal        = int32(C.CALIBER_STATUS_INTERNAL)
 	maxForeignTextBytes   = 1 << 20
 )
 
@@ -56,10 +56,10 @@ func Scope_Create(path *C.char, length C.size_t) C.int32_t {
 		}
 		caliberPath := C.CString(libraryPath)
 		defer C.free(unsafe.Pointer(caliberPath))
-		if C.scope_caliber_open(caliberPath) != C.CALIBER_OK {
+		if C.scope_caliber_open(caliberPath) != C.CALIBER_STATUS_OK {
 			return statusUnavailable
 		}
-		if C.scope_caliber_create_context() != C.CALIBER_OK {
+		if C.scope_caliber_create_context() != C.CALIBER_STATUS_OK {
 			C.scope_caliber_close_library()
 			return statusUnavailable
 		}
@@ -195,7 +195,7 @@ func Scope_ReadTelemetry(dst *C.size_t, capacity C.size_t, outCount *C.size_t, s
 	}
 	var info C.CaliberTelemetryInfo
 	status := C.scope_caliber_read_telemetry(dst, capacity, &info)
-	if status == C.CALIBER_OK {
+	if status == C.CALIBER_STATUS_OK {
 		*outCount = info.value_count
 		*sequence = info.sequence
 	}

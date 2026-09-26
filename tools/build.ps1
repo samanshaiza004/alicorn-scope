@@ -43,20 +43,23 @@ if (-not $resolved -or -not $resolved.AlicornRoot -or -not $resolved.CaliberRoot
 $AlicornRoot = $resolved.AlicornRoot
 $CaliberRoot = $resolved.CaliberRoot
 
-$caliberSource = Join-Path $CaliberRoot 'crates\caliber-ffi\src\lib.rs'
-if (-not (Test-Path -LiteralPath $caliberSource -PathType Leaf) -or
-    -not (Select-String -Quiet -Path $caliberSource -Pattern 'context_wait_wake|context_stop_wake_waiters')) {
+$caliberHeader = Join-Path $CaliberRoot 'include\caliber.h'
+if (-not (Test-Path -LiteralPath $caliberHeader -PathType Leaf) -or
+    -not (Select-String -Quiet -Path $caliberHeader -Pattern 'context_wait_wake|context_stop_wake_waiters')) {
     throw 'The resolved Caliber checkout is missing the blocking wake ABI required by Scope.'
 }
 
 $out = Join-Path $ScopeRoot 'out'
 New-Item -ItemType Directory -Force -Path $out | Out-Null
 $oldCgo = $env:CGO_ENABLED
+$oldCgoCFlags = $env:CGO_CFLAGS
 $oldCache = $env:GOCACHE
 $oldTelemetry = $env:GOTELEMETRY
 Push-Location $ScopeRoot
 try {
     $env:CGO_ENABLED = '1'
+    $includePath = ($CaliberRoot.Replace('\', '/') + '/include')
+    $env:CGO_CFLAGS = (($oldCgoCFlags + ' -I' + $includePath).Trim())
     $env:GOCACHE = Join-Path $out 'go-cache'
     $env:GOTELEMETRY = 'off'
 
@@ -84,6 +87,7 @@ try {
 } finally {
     Pop-Location
     if ($null -eq $oldCgo) { Remove-Item Env:CGO_ENABLED -ErrorAction SilentlyContinue } else { $env:CGO_ENABLED = $oldCgo }
+    if ($null -eq $oldCgoCFlags) { Remove-Item Env:CGO_CFLAGS -ErrorAction SilentlyContinue } else { $env:CGO_CFLAGS = $oldCgoCFlags }
     if ($null -eq $oldCache) { Remove-Item Env:GOCACHE -ErrorAction SilentlyContinue } else { $env:GOCACHE = $oldCache }
     if ($null -eq $oldTelemetry) { Remove-Item Env:GOTELEMETRY -ErrorAction SilentlyContinue } else { $env:GOTELEMETRY = $oldTelemetry }
 }

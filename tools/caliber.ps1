@@ -5,7 +5,7 @@ $ErrorActionPreference = 'Stop'
 $ScopeRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $CaliberCli = $env:CALIBER_CLI
 if (-not $CaliberCli) {
-    $onPath = Get-Command caliber -CommandType Application -ErrorAction SilentlyContinue
+    $onPath = Get-Command caliber -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($onPath) { $CaliberCli = $onPath.Source }
 }
 

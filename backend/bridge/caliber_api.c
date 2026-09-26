@@ -1,4 +1,4 @@
-#include "caliber_api.h"
+#include "scope_backend.h"
 
 #include <string.h>
 
@@ -72,7 +72,7 @@ int32_t scope_caliber_create_context(void) {
     config.telemetry_width = 5;
     config.max_pending_commands = 128;
     CaliberStatus status = api->context_create(&config, &context);
-    if (status != CALIBER_OK) context = NULL;
+    if (status != CALIBER_STATUS_OK) context = NULL;
     return status;
 }
 
@@ -91,11 +91,11 @@ int32_t scope_caliber_take_command(uint8_t *dst, size_t cap, size_t *out_len) {
     if (api == NULL || context == NULL || out_len == NULL || api->context_peek_command == NULL || api->context_take_command == NULL) return 1;
     size_t len = 0;
     CaliberStatus status = api->context_peek_command(context, &len);
-    if (status != CALIBER_OK) return status;
-    if (len > cap || (len != 0 && dst == NULL)) return CALIBER_BUFFER_TOO_SMALL;
+    if (status != CALIBER_STATUS_OK) return status;
+    if (len > cap || (len != 0 && dst == NULL)) return CALIBER_STATUS_BUFFER_TOO_SMALL;
     size_t copied = 0;
     status = api->context_take_command(context, dst, cap, &copied);
-    if (status == CALIBER_OK) *out_len = copied;
+    if (status == CALIBER_STATUS_OK) *out_len = copied;
     return status;
 }
 
@@ -108,17 +108,17 @@ int32_t scope_caliber_read_state(uint8_t *dst, size_t cap, size_t *out_len, uint
     if (api == NULL || context == NULL || out_len == NULL || revision == NULL || schema == NULL || api->context_read_latest_state == NULL || api->state_publication_release == NULL) return 1;
     CaliberStatePublication publication = {0};
     CaliberStatus status = api->context_read_latest_state(context, &publication);
-    if (status != CALIBER_OK) return status;
+    if (status != CALIBER_STATUS_OK) return status;
     if (publication.len > cap || (publication.len != 0 && dst == NULL)) {
         api->state_publication_release(&publication);
-        return CALIBER_BUFFER_TOO_SMALL;
+        return CALIBER_STATUS_BUFFER_TOO_SMALL;
     }
     if (publication.len != 0) memcpy(dst, publication.data, publication.len);
     *out_len = publication.len;
     *revision = publication.revision;
     *schema = publication.schema;
     api->state_publication_release(&publication);
-    return CALIBER_OK;
+    return CALIBER_STATUS_OK;
 }
 
 int32_t scope_caliber_publish_resource(const uint8_t *data, size_t len, uint64_t *id, uint64_t *generation) {
@@ -130,15 +130,15 @@ int32_t scope_caliber_read_resource(uint64_t id, uint64_t generation, uint8_t *d
     if (api == NULL || context == NULL || out_len == NULL || api->context_map_resource == NULL || api->resource_release == NULL) return 1;
     CaliberResourceView view = {0};
     CaliberStatus status = api->context_map_resource(context, id, generation, &view);
-    if (status != CALIBER_OK) return status;
+    if (status != CALIBER_STATUS_OK) return status;
     if (view.len > cap || (view.len != 0 && dst == NULL)) {
         api->resource_release(&view);
-        return CALIBER_BUFFER_TOO_SMALL;
+        return CALIBER_STATUS_BUFFER_TOO_SMALL;
     }
     if (view.len != 0) memcpy(dst, view.data, view.len);
     *out_len = view.len;
     api->resource_release(&view);
-    return CALIBER_OK;
+    return CALIBER_STATUS_OK;
 }
 
 int32_t scope_caliber_release_resource(uint64_t id, uint64_t generation) {

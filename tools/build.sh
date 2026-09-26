@@ -47,7 +47,7 @@ scope_resolve_dependencies "$SCOPE_ROOT"
 ALICORN_ROOT=$SCOPE_RESOLVED_ALICORN_ROOT
 CALIBER_ROOT=$SCOPE_RESOLVED_CALIBER_ROOT
 
-if ! grep -Eq 'context_wait_wake|context_stop_wake_waiters' "$CALIBER_ROOT/crates/caliber-ffi/src/lib.rs"; then
+if ! grep -Eq 'context_wait_wake|context_stop_wake_waiters' "$CALIBER_ROOT/include/caliber.h"; then
     printf 'Resolved Caliber checkout is missing the blocking wake ABI required by Scope.\n' >&2
     exit 1
 fi
@@ -55,6 +55,7 @@ fi
 OUT_DIR="$SCOPE_ROOT/out"
 mkdir -p "$OUT_DIR"
 export CGO_ENABLED=1
+export CGO_CFLAGS="${CGO_CFLAGS:-} -I$CALIBER_ROOT/include"
 export GOCACHE=${GOCACHE:-"$OUT_DIR/go-cache"}
 export GOTELEMETRY=off
 cd "$SCOPE_ROOT"
